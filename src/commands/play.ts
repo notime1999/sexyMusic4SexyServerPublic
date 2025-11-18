@@ -79,6 +79,15 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
         console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist);
 
         if (isYouTubePlaylist) {
+            // --- AGGIUNGI QUESTO BLOCCO PRIMA DI USARE gpYT ---
+            const member = interaction.member as GuildMember;
+            if (!member || !member.voice?.channel) {
+                return interaction.reply('Devi essere in un canale vocale per riprodurre la musica.');
+            }
+            const voiceChannel = member.voice.channel;
+            const gpYT = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
+            // --- FINE BLOCCO ---
+
             // Verifica cookies.txt PRIMA di procedere
             const cookiesOk = await checkCookiesFile(interaction.channel);
             if (!cookiesOk) {
@@ -87,67 +96,73 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
             const playlistId = await ytpl.getPlaylistID(query);
             console.log('[play] playlistId=', playlistId);
-            const playlist = await ytpl(playlistId, { pages: Infinity });
-            console.log('[play] playlist items:', playlist.items?.length);
-            console.log('[DEBUG] Playlist items:', playlist.items.map(i => ({ title: i.title, id: i.id, url: i.shortUrl })));
 
-            if (!playlist || !playlist.items || playlist.items.length === 0) {
-                return interaction.reply('Playlist trovata ma vuota o non accessibile.');
+            const TIMEOUT_MS = 20000; // 20 secondi
+
+            async function withTimeout(promise: Promise<any>, ms: number) {
+                return Promise.race([
+                    promise,
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+                ]);
             }
 
-            const member = interaction.member as GuildMember;
-            if (!member || !member.voice?.channel) {
-                return interaction.reply('Devi essere in un canale vocale per riprodurre la musica.');
-            }
-            const voiceChannel = member.voice.channel;
+            // Esempio di uso:
+            try {
+                // Sostituisci una chiamata lunga, tipo:
+                // const playlist = await ytpl(playlistId, { pages: Infinity });
+                const playlist = await withTimeout(ytpl(playlistId, { pages: Infinity }), TIMEOUT_MS);
+                console.log('[play] playlist items:', playlist.items?.length);
+                console.log('[DEBUG] Playlist items:', playlist.items.map((i: any) => ({ title: i.title, id: i.id, url: i.shortUrl })));
 
-            const gpYT = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
-            // gpYT.queue = [];
+                const realItems = playlist.items.filter((item: any) => !!item.url);
+                const skippedItems = playlist.items.filter((item: any) => !item.url);
 
-            // Filtra gli elementi della playlist per avere solo quelli validi
-            const realItems = playlist.items.filter(item => !!item.url);
-            const skippedItems = playlist.items.filter(item => !item.url);
-            if (skippedItems.length > 0) {
-                console.warn('[play] Skipped playlist items:', skippedItems.map(i => ({
-                    title: i.title,
-                    url: i.url,
-                    id: i.id,
-                    shortUrl: i.shortUrl
-                })));
-            }
-            if (realItems.length === 0) {
-                return interaction.reply('Nessun brano valido trovato nella playlist.');
-            }
-            gpYT.queue = [];
-            for (const item of realItems) {
-                gpYT.enqueue({
-                    url: item.url || item.shortUrl,
-                    title: item.title ?? item.url,
-                    requestedBy: interaction.user.tag
-                }, false); // PATCH: false per non avviare subito
-            }
-            gpYT.playNext().catch(e => console.error('[GuildPlayer] playNext error', e)); // PATCH: avvia solo una volta dopo
-            setTimeout(() => {
-                console.log('[DEBUG] queue after playNext:', gpYT.queue.length, gpYT.queue.map(t => t.title));
-            }, 2000);
-            const nowPlaying = gpYT.getCurrent();
-            const queueList = buildQueueList(gpYT.queue);
+                if (skippedItems.length > 0) {
+                    console.warn('[play] Skipped playlist items:', skippedItems.map((i: any) => ({
+                        title: i.title,
+                        url: i.url,
+                        id: i.id,
+                        shortUrl: i.shortUrl
+                    })));
+                }
 
-            const embed = new EmbedBuilder()
-                .setTitle('Coda musicale')
-                .addFields(
-                    { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
-                    { name: 'Queue', value: queueList }
+                if (realItems.length === 0) {
+                    return interaction.reply('Nessun brano valido trovato nella playlist.');
+                }
+                gpYT.queue = [];
+                for (const item of realItems) {
+                    gpYT.enqueue({
+                        url: item.url || item.shortUrl,
+                        title: item.title ?? item.url,
+                        requestedBy: interaction.user.tag
+                    }, false); // PATCH: false per non avviare subito
+                }
+                gpYT.playNext().catch((e: any) => console.error('[GuildPlayer] playNext error', e)); // PATCH: avvia solo una volta dopo
+                setTimeout(() => {
+                    console.log('[DEBUG] queue after playNext:', gpYT.queue.length, gpYT.queue.map((t: any) => t.title));
+                }, 2000);
+                const nowPlaying = gpYT.getCurrent();
+                const queueList = buildQueueList(gpYT.queue);
+
+                const embed = new EmbedBuilder()
+                    .setTitle('Coda musicale')
+                    .addFields(
+                        { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
+                        { name: 'Queue', value: queueList }
+                    );
+
+                const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+                    new ButtonBuilder().setCustomId('shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Primary),
+                    new ButtonBuilder().setCustomId('skip').setLabel('Skip').setStyle(ButtonStyle.Secondary),
+                    new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
                 );
 
-            const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-                new ButtonBuilder().setCustomId('shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Primary),
-                new ButtonBuilder().setCustomId('skip').setLabel('Skip').setStyle(ButtonStyle.Secondary),
-                new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
-            );
-
-            await interaction.editReply({ embeds: [embed], components: [row] });
-            return;
+                // await interaction.editReply({ embeds: [embed], components: [row] });
+                return;
+            } catch (err) {
+                await interaction.editReply('❌ Errore o timeout durante il caricamento della playlist.');
+                return;
+            }
         }
 
         if (isSpotifyPlaylist) {
@@ -268,7 +283,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
             );
 
-            await interaction.editReply({ embeds: [embed], components: [row] });
+            // await interaction.editReply({ embeds: [embed], components: [row] });
             return;
         }
     } catch (err) {
@@ -327,7 +342,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
         new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
     );
 
-    await interaction.editReply({ embeds: [embed], components: [row] });
+    // await interaction.editReply({ embeds: [embed], components: [row] });
 };
 
 // utility function to get playdl stream (video or playlist)
