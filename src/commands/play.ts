@@ -215,7 +215,13 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
             // PATCH: aggiungi tutte le tracce SOLO con enqueue, non azzerare la queue!
             for (const track of tracksToEnqueue) {
-                gp.enqueue(track, false); // NON avviare subito la riproduzione
+                // Check for duplicates by URL or title
+                const alreadyInQueue = gp.queue.some(
+                    t => t.url === track.url || t.title === track.title
+                );
+                if (!alreadyInQueue) {
+                    gp.enqueue(track, false);
+                }
             }
             // PATCH: avvia solo se non c'è già una traccia in riproduzione
             if (!gp.getCurrent()) {
