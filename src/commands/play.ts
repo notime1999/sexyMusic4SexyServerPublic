@@ -471,7 +471,7 @@ function extractSpotifyPlaylistId(url: string): string | null {
     return null;
 }
 
-function buildQueueList(queue: any[]) {
+export function buildQueueList(queue: any[]) {
     if (!queue || queue.length === 0) return 'Nessuna traccia in coda.';
     return queue.map((t, i) => `${i + 1}. ${t.title} (${t.url})`).join('\n');
 }
