@@ -28,11 +28,11 @@ import fsPromises from 'fs/promises';
 const streamManager = new StreamManager();
 
 async function checkCookiesFile(channel: any) {
-    // Cerca prima in /app/cookies.txt, poi in ./cookies.txt
-    let cookiePath = '/app/cookies.txt';
+    // Cerca prima in ./cookies.txt, poi in /app/cookies.txt
+    let cookiePath = './cookies.txt';
     try {
         await fsPromises.access(cookiePath).catch(async () => {
-            cookiePath = './cookies.txt';
+            cookiePath = '/app/cookies.txt';
             await fsPromises.access(cookiePath);
         });
         const cookies = await fsPromises.readFile(cookiePath, 'utf-8');
@@ -436,8 +436,11 @@ export async function streamWithYtDlp(url: string) {
     }
     console.log('[play] using yt-dlp binary (spawn):', bin);
 
+    // Cambia qui: usa ./cookies.txt invece di /app/cookies.txt
+    const cookiePath = path.resolve('./cookies.txt');
+
     const args = [
-        '--cookies', '/app/cookies.txt',
+        '--cookies', cookiePath,
         '-f', 'bestaudio/best',
         '-o', '-', // stdout
         '--no-playlist',
@@ -462,37 +465,14 @@ function extractSpotifyPlaylistId(url: string): string | null {
         if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
     } catch (e) {
         // try regex fallback
-        const m = url.match(/playlist\/([A-Za-z0-9]+)/);
-        if (m) return m[1];
+        const m = url.match(/playlist\/([A-Za-z0-9_-]+)/);
+        if (m && m[1]) return m[1];
     }
     return null;
 }
 
-// Esempio funzione formatQueueMessage
-function formatQueueMessage(player: GuildPlayer) {
-    const lines = [];
-    const current = player.getCurrentTrack();
-    if (current) {
-        lines.push(`${current.title} (Now playing)`);
-    }
-    for (let i = 0; i < Math.min(player.queue.length, 10); i++) {
-        lines.push(`${i + 1}. ${player.queue[i].title}`);
-    }
-    if (player.queue.length > 10) {
-        lines.push(`...and ${player.queue.length - 10} more`);
-    }
-    return lines.join('\n');
-}
-
-export function buildQueueList(queue: any[], maxLen = 950) {
-    let out = '';
-    let i = 0;
-    for (; i < queue.length; i++) {
-        const line = `${i + 1}. ${queue[i].title}\n`;
-        if ((out + line).length > maxLen) break;
-        out += line;
-    }
-    if (i < queue.length) out += `...and ${queue.length - i} more`;
-    return out.trim();
+function buildQueueList(queue: any[]) {
+    if (!queue || queue.length === 0) return 'Nessuna traccia in coda.';
+    return queue.map((t, i) => `${i + 1}. ${t.title} (${t.url})`).join('\n');
 }
 
