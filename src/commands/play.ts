@@ -97,7 +97,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             const playlistId = await ytpl.getPlaylistID(query);
             console.log('[play] playlistId=', playlistId);
 
-            const TIMEOUT_MS = 20000; // 20 secondi
+            const TIMEOUT_MS = 60000; // 60 secondi
 
             async function withTimeout(promise: Promise<any>, ms: number) {
                 return Promise.race([
@@ -110,7 +110,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             try {
                 // Sostituisci una chiamata lunga, tipo:
                 // const playlist = await ytpl(playlistId, { pages: Infinity });
-                const playlist = await withTimeout(ytpl(playlistId, { pages: Infinity }), TIMEOUT_MS);
+                const playlist = await withTimeout(ytpl(playlistId, { pages: 1 }), TIMEOUT_MS);
                 console.log('[play] playlist items:', playlist.items?.length);
                 console.log('[DEBUG] Playlist items:', playlist.items.map((i: any) => ({ title: i.title, id: i.id, url: i.shortUrl })));
 
