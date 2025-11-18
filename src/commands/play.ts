@@ -78,6 +78,8 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
         const isSpotifyPlaylist = /open\.spotify\.com\/.*playlist/.test(query) || /spotify:playlist:/.test(query);
         console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist);
 
+        let gp: GuildPlayer | undefined;
+
         if (isYouTubePlaylist) {
             // --- AGGIUNGI QUESTO BLOCCO PRIMA DI USARE gpYT ---
             const member = interaction.member as GuildMember;
@@ -85,7 +87,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 return interaction.reply('Devi essere in un canale vocale per riprodurre la musica.');
             }
             const voiceChannel = member.voice.channel;
-            const gpYT = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
+            gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
             // --- FINE BLOCCO ---
 
             // Verifica cookies.txt PRIMA di procedere
@@ -129,26 +131,30 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 if (realItems.length === 0) {
                     return interaction.reply('Nessun brano valido trovato nella playlist.');
                 }
-                gpYT.queue = [];
+                gp.queue = [];
                 for (const item of realItems) {
-                    gpYT.enqueue({
+                    gp.enqueue({
                         url: item.url || item.shortUrl,
                         title: item.title ?? item.url,
                         requestedBy: interaction.user.tag
                     }, false); // PATCH: false per non avviare subito
                 }
-                gpYT.playNext().catch((e: any) => console.error('[GuildPlayer] playNext error', e)); // PATCH: avvia solo una volta dopo
+                gp.playNext().catch((e: any) => console.error('[GuildPlayer] playNext error', e)); // PATCH: avvia solo una volta dopo
                 setTimeout(() => {
-                    console.log('[DEBUG] queue after playNext:', gpYT.queue.length, gpYT.queue.map((t: any) => t.title));
+                    console.log('[DEBUG] queue after playNext:', gp!.queue.length, gp!.queue.map((t: any) => t.title));
                 }, 2000);
-                const nowPlaying = gpYT.getCurrent();
-                const queueList = buildQueueList(gpYT.queue);
+                const nowPlaying = gp.getCurrent();
+                const maxQueueToShow = 10;
+                const more = gp.queue.length > maxQueueToShow ? `\n...e altri ${gp.queue.length - maxQueueToShow} brani` : '';
+                let queueStr = buildQueueList(gp.queue.slice(0, maxQueueToShow)) + more;
+                if (!queueStr.trim()) queueStr = 'Nessuna traccia in coda.';
+                if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
 
                 const embed = new EmbedBuilder()
                     .setTitle('Coda musicale')
                     .addFields(
                         { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
-                        { name: 'Queue', value: queueList }
+                        { name: 'Queue', value: queueStr }
                     );
 
                 const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -157,9 +163,10 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                     new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
                 );
 
-                // await interaction.editReply({ embeds: [embed], components: [row] });
+                await interaction.editReply({ embeds: [embed], components: [row] });
                 return;
             } catch (err) {
+                console.error('[play] Playlist catch error:', err);
                 await interaction.editReply('❌ Errore o timeout durante il caricamento della playlist.');
                 return;
             }
@@ -172,6 +179,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 return interaction.reply('Devi essere in un canale vocale per riprodurre la musica.');
             }
             const voiceChannel = member.voice.channel;
+            gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
 
             const playlistId = extractSpotifyPlaylistId(query);
             let tracks: { name: string; artists: string[] }[] = [];
@@ -186,7 +194,6 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 return interaction.reply('Playlist Spotify trovata ma vuota o non accessibile.');
             }
 
-            const gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
             const windowSize = 10;
 
             const tracksToEnqueue: any[] = [];
@@ -267,13 +274,17 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             }
 
             const nowPlaying = gp.getCurrent();
-            const queueList = buildQueueList(gp.queue);
+            const maxQueueToShow = 10;
+            const more = gp.queue.length > maxQueueToShow ? `\n...e altri ${gp.queue.length - maxQueueToShow} brani` : '';
+            let queueStr = buildQueueList(gp.queue.slice(0, maxQueueToShow)) + more;
+            if (!queueStr.trim()) queueStr = 'Nessuna traccia in coda.';
+            if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
 
             const embed = new EmbedBuilder()
                 .setTitle('Coda musicale')
                 .addFields(
                     { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
-                    { name: 'Queue', value: queueList }
+                    { name: 'Queue', value: queueStr }
                 );
 
 
@@ -283,7 +294,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
             );
 
-            // await interaction.editReply({ embeds: [embed], components: [row] });
+            await interaction.editReply({ embeds: [embed], components: [row] });
             return;
         }
     } catch (err) {

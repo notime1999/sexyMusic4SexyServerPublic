@@ -61,13 +61,17 @@ client.on('interactionCreate', async interaction => {
 
     // Ricostruisci embed e bottoni aggiornati
     const nowPlaying = gp.getCurrent();
-    const queueList = buildQueueList(gp.queue);
+    const maxQueueToShow = 10;
+    const more = gp.queue.length > maxQueueToShow ? `\n...e altri ${gp.queue.length - maxQueueToShow} brani` : '';
+    let queueStr = buildQueueList(gp.queue.slice(0, maxQueueToShow)) + more;
+    if (!queueStr.trim()) queueStr = 'Nessuna traccia in coda.';
+    if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
 
     const embed = new EmbedBuilder()
         .setTitle('Coda musicale')
         .addFields(
             { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
-            { name: 'Queue', value: queueList }
+            { name: 'Queue', value: queueStr }
         );
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -115,7 +119,3 @@ client.on('interactionCreate', async (interaction: Interaction) => {
 handleReady(client);
 
 client.login(process.env.DISCORD_TOKEN);
-
-exec('yt-dlp --version && yt-dlp --cookies /app/cookies.txt "https://www.youtube.com/watch?v=04F4xlWSFh0"', (err, stdout, stderr) => {
-  console.log('YT-DLP DEBUG:', stdout, stderr);
-});
