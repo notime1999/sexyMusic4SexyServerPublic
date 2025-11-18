@@ -10,15 +10,18 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { getPlaydlStream, streamWithYtDlp } from '../commands/play';
 
-type Track = {
-    url?: string;
-    title?: string;
+export interface Track {
+    url: string;
+    title: string;
     requestedBy?: string;
     spotifyName?: string;
     spotifyArtists?: string[];
     spotifyPlaylistId?: string;
     spotifyIndex?: number;
-};
+    startedBy?: string;
+    lastAction?: string;
+    source?: 'YouTube' | 'Spotify';
+}
 
 export default class GuildPlayer {
     private static players = new Map<string, GuildPlayer>();
@@ -38,6 +41,8 @@ export default class GuildPlayer {
     public _playlistPointer?: number;
     public _playlistId?: string;
     public _lastRequester?: string;
+    public startedBy?: string;
+    public lastAction?: string;
 
     private inactivityTimer: NodeJS.Timeout | null = null;
     private static readonly INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minuti
@@ -75,7 +80,7 @@ export default class GuildPlayer {
                 // console.debug('player state', newS.status);
             });
             this.player.on(AudioPlayerStatus.Idle, () => {
-                this.playNext().catch(() => {});
+                this.playNext().catch(() => { });
             });
             this.player.on('error', (e) => console.error('[GuildPlayer] player error', e));
         }

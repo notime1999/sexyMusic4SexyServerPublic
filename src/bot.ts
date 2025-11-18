@@ -67,12 +67,28 @@ client.on('interactionCreate', async interaction => {
     if (!queueStr.trim()) queueStr = 'Nessuna traccia in coda.';
     if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
 
+    // Prima di creare l'embed:
+    const startedBy = gp.startedBy || 'Sconosciuto';
+    const actionLabel = interaction.customId === 'shuffle' ? 'Shuffle'
+        : interaction.customId === 'skip' ? 'Skip'
+        : interaction.customId === 'stop' ? 'Stop'
+        : '';
+    const actionUser = interaction.member?.user?.username || interaction.user.username;
+    if (actionLabel) {
+        gp.lastAction = `Richiesta azione ${actionLabel} da: ${actionUser}`;
+    }
+
+    const fields = [
+        { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
+        { name: 'Queue', value: queueStr },
+        { name: 'Avviato da', value: startedBy, inline: true }
+    ];
+    if (gp.lastAction) {
+        fields.push({ name: 'Ultima azione', value: gp.lastAction, inline: true });
+    }
     const embed = new EmbedBuilder()
         .setTitle('Coda musicale')
-        .addFields(
-            { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
-            { name: 'Queue', value: queueStr }
-        );
+        .addFields(fields);
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
         new ButtonBuilder().setCustomId('shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Primary),

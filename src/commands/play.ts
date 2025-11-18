@@ -49,11 +49,16 @@ async function checkCookiesFile(channel: any) {
 
 export const execute = async (interaction: ChatInputCommandInteraction, args: string[] = []) => {
     await interaction.deferReply();
+    setTimeout(() => {
+        interaction.deleteReply().catch(() => { });
+    }, 60000);
     console.log("ESEGUO PLAY", Date.now(), interaction.id, interaction.commandName, args);
     let query = args.join(' ').trim();
 
     const ytPlaylistMatch = query.match(/[?&]list=([A-Za-z0-9_-]+)/);
     const playlistId = ytPlaylistMatch ? ytPlaylistMatch[1] : null;
+    const isYouTubePlaylist = /youtube\.com\/.*[?&]list=/.test(query) || /youtu\.be\/.*[?&]list=/.test(query);
+    const isSpotifyPlaylist = /open\.spotify\.com\/.*playlist/.test(query) || /spotify:playlist:/.test(query);
 
     if (playlistId && playlistId.startsWith('RD')) {
         // È una Mix, NON una playlist standard: riproduci solo il primo video
@@ -74,8 +79,6 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
     // Detect Spotify playlist URL and enqueue all tracks
     try {
-        const isYouTubePlaylist = /youtube\.com\/.*[?&]list=/.test(query) || /youtu\.be\/.*[?&]list=/.test(query);
-        const isSpotifyPlaylist = /open\.spotify\.com\/.*playlist/.test(query) || /spotify:playlist:/.test(query);
         console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist);
 
         let gp: GuildPlayer | undefined;
@@ -88,6 +91,10 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             }
             const voiceChannel = member.voice.channel;
             gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
+            // Dopo aver ottenuto gp:
+            if (!gp.startedBy) {
+                gp.startedBy = interaction.member?.user?.username || interaction.user.username;
+            }
             // --- FINE BLOCCO ---
 
             // Verifica cookies.txt PRIMA di procedere
@@ -131,12 +138,13 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 if (realItems.length === 0) {
                     return interaction.reply('Nessun brano valido trovato nella playlist.');
                 }
-                gp.queue = [];
+                // gp.queue = [];
                 for (const item of realItems) {
                     gp.enqueue({
                         url: item.url || item.shortUrl,
                         title: item.title ?? item.url,
-                        requestedBy: interaction.user.tag
+                        requestedBy: interaction.user.tag,
+                        source: 'YouTube'
                     }, false); // PATCH: false per non avviare subito
                 }
                 gp.playNext().catch((e: any) => console.error('[GuildPlayer] playNext error', e)); // PATCH: avvia solo una volta dopo
@@ -150,11 +158,16 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 if (!queueStr.trim()) queueStr = 'Nessuna traccia in coda.';
                 if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
 
+                const requester = interaction.member?.user?.username || interaction.user.username;
+
+                const startedBy = gp.startedBy || 'Sconosciuto';
+
                 const embed = new EmbedBuilder()
                     .setTitle('Coda musicale')
                     .addFields(
                         { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
-                        { name: 'Queue', value: queueStr }
+                        { name: 'Queue', value: queueStr },
+                        { name: 'Avviato da', value: startedBy, inline: true }
                     );
 
                 const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -180,7 +193,10 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             }
             const voiceChannel = member.voice.channel;
             gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
-
+            // Dopo aver ottenuto gp:
+            if (!gp.startedBy) {
+                gp.startedBy = interaction.member?.user?.username || interaction.user.username;
+            }
             const playlistId = extractSpotifyPlaylistId(query);
             let tracks: { name: string; artists: string[] }[] = [];
             try {
@@ -227,8 +243,9 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                         spotifyIndex: i,
                         spotifyName: t.name,
                         spotifyArtists: t.artists,
-                        requestedBy: interaction.user.tag
-                    });
+                        requestedBy: interaction.user.tag,
+                        source: 'Spotify'
+                    }, false);
                     urlsSet.add(info.url);
                     titlesSet.add(info.title ?? '');
                     found++;
@@ -280,11 +297,15 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             if (!queueStr.trim()) queueStr = 'Nessuna traccia in coda.';
             if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
 
+
+            const requester = interaction.member?.user?.username || interaction.user.username;
+
             const embed = new EmbedBuilder()
                 .setTitle('Coda musicale')
                 .addFields(
                     { name: 'Now playing', value: nowPlaying?.title ?? 'Niente' },
-                    { name: 'Queue', value: queueStr }
+                    { name: 'Queue', value: queueStr },
+                    { name: 'Richiesto da', value: requester, inline: true }
                 );
 
 
@@ -331,10 +352,14 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
     // Instead of creating a new player/connection, use GuildPlayer:
     const gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
+    if (!gp.startedBy) {
+        gp.startedBy = interaction.member?.user?.username || interaction.user.username;
+    }
     gp.enqueue({
         url: songInfo.url,
         title: songInfo.title ?? songInfo.url,
         requestedBy: interaction.user.tag,
+        source: isSpotifyPlaylist ? 'Spotify' : 'YouTube'
     });
 
     const nowPlaying = gp.getCurrent();
@@ -353,7 +378,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
         new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
     );
 
-    // await interaction.editReply({ embeds: [embed], components: [row] });
+    await interaction.editReply({ embeds: [embed], components: [row] });
 };
 
 // utility function to get playdl stream (video or playlist)
@@ -499,6 +524,11 @@ function extractSpotifyPlaylistId(url: string): string | null {
 
 export function buildQueueList(queue: any[]) {
     if (!queue || queue.length === 0) return 'Nessuna traccia in coda.';
-    return queue.map((t, i) => `${i + 1}. ${t.title} (${t.url})`).join('\n');
+    return queue.map((t, i) => {
+        let label = '';
+        if (t.source === 'Spotify') label = '[Spotify]';
+        else if (t.source === 'YouTube') label = '[YouTube]';
+        return `${i + 1}. ${t.title} ${label} (${t.url})`;
+    }).join('\n');
 }
 
