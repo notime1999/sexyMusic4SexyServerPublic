@@ -5,11 +5,10 @@
   "main": "src/bot.ts",
   "scripts": {
     "prestart": "npm run build",
-    "download-cookies": "node -e \"require('fs').mkdirSync('/app', {recursive:true})\" && curl -L -o /app/cookies.txt 'https://drive.google.com/uc?export=download&id=1i9xXPn2BJJJB7FfQbK1CDdA-vLfLPnVr'",
-    "start": "node -r dotenv/config dist/init-cookies.js && node dist/bot.js",
     "build": "tsc",
     "dev": "ts-node-dev --respawn --transpile-only src/bot.ts",
-    "prod": "npm run build && npm run start"
+    "prod": "npm run build && npm run start",
+    "start": "node dist/bot.js"
   },
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
