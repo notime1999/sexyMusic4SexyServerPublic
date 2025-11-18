@@ -1,10 +1,10 @@
-import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayer, AudioPlayerStatus, NoSubscriberBehavior, entersState, VoiceConnection, VoiceConnectionStatus, createAudioResource as createRes, StreamType } from '@discordjs/voice';
+import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayer, AudioPlayerStatus, NoSubscriberBehavior, entersState, VoiceConnection, VoiceConnectionStatus, createAudioResource as createRes, StreamType, AudioResource } from '@discordjs/voice';
 import playdl from 'play-dl';
 import ytdl from 'ytdl-core';
-import { VoiceBasedChannel } from 'discord.js';
+import { VoiceBasedChannel, Client } from 'discord.js';
 import { getPlaylistTrackAt } from '../services/spotify';
-import { searchYouTube as searchYouTubeService } from '../services/youtube';
 import { searchYouTube as searchSpotifyYT } from '../services/spotify';
+import { searchYouTube as searchYouTubeService } from '../services/youtube';
 import yts from 'yt-search';
 import path from 'path';
 import { spawn } from 'child_process';
@@ -14,13 +14,13 @@ export interface Track {
     url: string;
     title: string;
     requestedBy?: string;
-    spotifyName?: string;
-    spotifyArtists?: string[];
     spotifyPlaylistId?: string;
     spotifyIndex?: number;
-    startedBy?: string;
-    lastAction?: string;
-    source?: 'YouTube' | 'Spotify';
+    spotifyName?: string;
+    spotifyArtists?: string[];
+    spotifyId?: string;
+    source?: 'Spotify' | 'YouTube';
+    thumbnail?: string;
 }
 
 export default class GuildPlayer {
@@ -32,6 +32,7 @@ export default class GuildPlayer {
     private guildId: string;
     private playing = false;
     private currentTrack: Track | null = null;
+    private voiceChannel: VoiceBasedChannel | null = null;
 
     public getCurrentTrack() {
         return this.currentTrack;
@@ -45,7 +46,7 @@ export default class GuildPlayer {
     public lastAction?: string;
 
     private inactivityTimer: NodeJS.Timeout | null = null;
-    private static readonly INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minuti
+    private static readonly INACTIVITY_TIMEOUT = 5 * 60 * 1000;
 
     private constructor(guildId: string) {
         this.guildId = guildId;
@@ -61,6 +62,8 @@ export default class GuildPlayer {
             gp = new GuildPlayer(guildId);
             this.players.set(guildId, gp);
         }
+        gp.voiceChannel = voiceChannel;
+        gp.stopped = false;
         gp.attachIfNeeded(voiceChannel);
         return gp;
     }
@@ -77,7 +80,6 @@ export default class GuildPlayer {
             this.player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
             this.connection!.subscribe(this.player);
             this.player.on('stateChange', (_oldS, newS) => {
-                // console.debug('player state', newS.status);
             });
             this.player.on(AudioPlayerStatus.Idle, () => {
                 this.playNext().catch(() => { });
@@ -120,43 +122,82 @@ export default class GuildPlayer {
         }
     }
 
-    async playNext() {
-        if (this.queue.length === 0) {
-            this.currentTrack = null;
-            this.playing = false;
-            return;
-        }
-        const nextTrack = this.queue.shift();
-        if (!nextTrack) {
-            this.currentTrack = null;
-            this.playing = false;
-            return;
-        }
-        this.currentTrack = nextTrack;
+    private stopped = false;
 
-        // Lazy resolve: se è un placeholder da playlist Spotify
-        if (!nextTrack.url && typeof nextTrack.spotifyPlaylistId === 'string' && typeof nextTrack.spotifyIndex === 'number') {
+    async stop() {
+        this.stopped = true;
+        try {
+            if (this.player) {
+                this.player.stop(true);
+            }
+            if (this.connection) {
+                this.connection.destroy();
+                this.connection = null;
+            }
+        } catch { }
+        this.queue = [];
+        this._playlistPointer = 0;
+        this._playlistTracks = [];
+        this.lastAction = undefined;
+        this.playing = false;
+        this.currentTrack = null;
+        this.clearInactivityTimer();
+    }
+
+    async playNext() {
+        if (!this.ensureVoiceConnection()) {
+            console.error('[GuildPlayer] Cannot play: not connected to voice channel');
+            return;
+        }
+
+        if (this.queue.length === 0) {
+            console.log('[GuildPlayer] Queue is empty');
+            this.currentTrack = null;
+            this.setPlaying(false);
+            return;
+        }
+
+        const track = this.queue.shift()!;
+        this.currentTrack = track;
+        console.log('[GuildPlayer] guild=' + this.guildId + ' playing next:', track.title);
+
+        let resource: AudioResource | null = null;
+
+        if (track.source === 'Spotify' && track.spotifyName && track.spotifyArtists) {
+            console.log('[GuildPlayer] Spotify track detected, searching on YouTube...');
+
+            const { searchYouTube: searchSpotifyYT } = await import('../services/spotify');
+            const { searchYouTube: searchYouTubeService } = await import('../services/youtube');
+            const yts = (await import('yt-search')).default;
+
+            const query = `${track.spotifyName} ${track.spotifyArtists.join(' ')} official audio`;
+            let info = null;
+
             try {
-                const meta = await getPlaylistTrackAt(nextTrack.spotifyPlaylistId, nextTrack.spotifyIndex);
-                if (meta) {
-                    nextTrack.spotifyName = meta.name;
-                    nextTrack.spotifyArtists = meta.artists;
-                    nextTrack.title = nextTrack.title ?? meta.name;
-                } else {
-                    console.warn(`[GuildPlayer] Could not fetch metadata for playlist ${nextTrack.spotifyPlaylistId} index=${nextTrack.spotifyIndex}, skipping`);
-                    setImmediate(() => this.playNext().catch(e => console.error('[GuildPlayer] playNext error', e)));
-                    return;
+                info = await searchSpotifyYT(query);
+                if (!info) info = await searchYouTubeService(query);
+
+                if (!info) {
+                    const r = await yts(query);
+                    const v = r?.videos?.[0];
+                    if (v) info = { url: v.url, title: v.title };
                 }
             } catch (e) {
-                console.error('[GuildPlayer] error fetching single track metadata', e);
-                setImmediate(() => this.playNext().catch(err => console.error('[GuildPlayer] playNext error', err)));
+                console.error('[GuildPlayer] Failed to find YouTube URL for Spotify track:', e);
+            }
+
+            if (info && info.url) {
+                track.url = info.url;
+                console.log('[GuildPlayer] Found YouTube URL:', info.url);
+            } else {
+                console.error('[GuildPlayer] Could not find YouTube URL for:', track.title);
+                await this.playNext();
                 return;
             }
         }
 
-        // Ora risolvi la traccia (se serve)
-        if (!nextTrack.url && nextTrack.spotifyName) {
-            const q = `${nextTrack.spotifyName} ${nextTrack.spotifyArtists?.join(' ') ?? ''}`.trim();
+        if (!track.url && track.spotifyName) {
+            const q = `${track.spotifyName} ${track.spotifyArtists?.join(' ') ?? ''}`.trim();
             console.log(`[GuildPlayer] resolving placeholder: ${q}`);
             let sInfo: { url?: string; title?: string } | null = null;
             try { sInfo = await searchSpotifyYT(q); } catch (e) { sInfo = null; }
@@ -171,45 +212,41 @@ export default class GuildPlayer {
                 } catch (e) { /* ignore */ }
             }
             if (sInfo && sInfo.url) {
-                nextTrack.url = sInfo.url;
-                nextTrack.title = nextTrack.title ?? sInfo.title;
-                console.log(`[GuildPlayer] placeholder resolved -> ${nextTrack.url}`);
+                track.url = sInfo.url;
+                track.title = track.title ?? sInfo.title;
+                console.log(`[GuildPlayer] placeholder resolved -> ${track.url}`);
             } else {
                 console.warn(`[GuildPlayer] could not resolve placeholder: ${q} — skipping`);
                 setImmediate(() => this.playNext().catch(err => console.error('[GuildPlayer] playNext error', err)));
                 return;
             }
-        } else if (!nextTrack.url) {
-            // Se ancora non c'è url, salta
+        } else if (!track.url) {
             console.warn(`[GuildPlayer] placeholder has no metadata to resolve, skipping`);
             setImmediate(() => this.playNext().catch(err => console.error('[GuildPlayer] playNext error', err)));
             return;
         }
 
-        console.log(`[GuildPlayer] guild=${this.guildId} playing next: ${nextTrack.title ?? nextTrack.url}`);
+        console.log(`[GuildPlayer] guild=${this.guildId} playing next: ${track.title ?? track.url}`);
         if (!this.connection || !this.player) {
             console.warn(`[GuildPlayer] guild=${this.guildId} no connection/player available`);
             return;
         }
 
-        // get stream via playdl -> fallback ytdl-core
         let streamObj: any = null;
-        if (!nextTrack.url) {
-            console.error('[GuildPlayer] track.url is undefined, skipping track:', nextTrack);
+        if (!track.url) {
+            console.error('[GuildPlayer] track.url is undefined, skipping track:', track);
             setImmediate(() => this.playNext().catch(e => console.error('[GuildPlayer] playNext error', e)));
             return;
         }
         try {
-            const url = nextTrack.url!;
-            // Usa SEMPRE la url originale per playdl.stream
+            const url = track.url!;
             streamObj = await playdl.stream(url);
         } catch (err) {
             console.warn('[GuildPlayer] playdl.stream failed, will try yt-dlp fallback', err);
             try {
-                // Fallback yt-dlp (usa la funzione già presente)
-                streamObj = await streamWithYtDlp(nextTrack.url!);
+                streamObj = await streamWithYtDlp(track.url!);
             } catch (err2) {
-                console.error('[GuildPlayer] all stream methods failed for', nextTrack.url, err2);
+                console.error('[GuildPlayer] all stream methods failed for', track.url, err2);
                 this.playing = false;
                 this.currentTrack = null;
                 setImmediate(() => this.playNext().catch(e => console.error('[GuildPlayer] playNext error', e)));
@@ -217,8 +254,6 @@ export default class GuildPlayer {
             }
         }
 
-        // create resource and play (existing code)
-        let resource;
         try {
             resource = createRes(streamObj.stream, {
                 inputType: streamObj.type === 'opus' ? StreamType.Opus : StreamType.Arbitrary,
@@ -240,20 +275,17 @@ export default class GuildPlayer {
         try { await entersState(this.connection, VoiceConnectionStatus.Ready, 15_000); } catch (e) { console.warn('[GuildPlayer] connection ready timeout', e); }
         try { await entersState(this.player, AudioPlayerStatus.Playing, 5_000); } catch (e) { console.warn('[GuildPlayer] player playing timeout', e); }
 
-        // Dopo aver tolto la traccia dalla queue:
         if (this._playlistTracks && typeof this._playlistPointer === 'number') {
             while (this.queue.length < 10 && this._playlistPointer < this._playlistTracks.length) {
                 const t = this._playlistTracks[this._playlistPointer];
                 const artists = Array.isArray(t.artists) ? t.artists : [];
-                const query = `${t.name} ${artists.join(' ')}`;
+                const query = `${t.name} ${artists.join(' ')} official audio spotify`;
                 let info = await searchSpotifyYT(query) || await searchYouTubeService(query);
                 if (!info?.url) {
-                    // Skippa la traccia se non trovi una url valida
                     console.warn(`[GuildPlayer] Skipping playlist track: no url found for "${query}"`);
                     this._playlistPointer++;
                     continue;
                 }
-                // Solo se info.url è valida, enqueua la traccia!
                 this.enqueue({
                     url: info.url,
                     title: info.title ?? t.name,
@@ -279,15 +311,6 @@ export default class GuildPlayer {
         }
     }
 
-    stop() {
-        // clear queue and destroy connection/player
-        this.queue = [];
-        this.currentTrack = null;
-        try { this.player?.stop(true); } catch { }
-        try { this.connection?.destroy(); } catch { }
-        GuildPlayer.players.delete(this.guildId);
-    }
-
     getQueue() {
         return this.queue.filter(t => !!t.url && !!t.title && t.title !== 'undefined');
     }
@@ -300,11 +323,144 @@ export default class GuildPlayer {
         this.playing = value;
     }
 
-    shuffleQueue() {
-        // Mescola solo la queue, NON currentTrack!
-        for (let i = this.queue.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [this.queue[i], this.queue[j]] = [this.queue[j], this.queue[i]];
+    async shuffleQueue(forceSimple = false) {
+        if (!this.ensureVoiceConnection()) {
+            console.error('[GuildPlayer] Cannot shuffle: not connected to voice channel');
+            return;
+        }
+
+        if (!forceSimple && this._playlistTracks && Array.isArray(this._playlistTracks) && this._playlistTracks.length > 0) {
+            console.log('[GuildPlayer] Shuffling entire Spotify playlist:', this._playlistTracks.length, 'tracks');
+
+            for (let i = this._playlistTracks.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [this._playlistTracks[i], this._playlistTracks[j]] = [this._playlistTracks[j], this._playlistTracks[i]];
+            }
+
+            console.log('[GuildPlayer] Playlist shuffled. First 3 tracks:',
+                this._playlistTracks.slice(0, 3).map(t => `${t.name} - ${t.artists.join(', ')}`));
+
+            this.queue = [];
+            this._playlistPointer = 0;
+
+            const MAX_TRACKS = 10;
+            const tracksToEnqueue: any[] = [];
+
+            for (let i = 0; i < this._playlistTracks.length && tracksToEnqueue.length < MAX_TRACKS; i++) {
+                const t = this._playlistTracks[i];
+                console.log(`[GuildPlayer] Adding track ${tracksToEnqueue.length + 1}/${MAX_TRACKS}: ${t.name} - ${t.artists.join(', ')}`);
+
+                tracksToEnqueue.push({
+                    url: t.url || `spotify:track:${t.id}`,
+                    title: `${t.name} - ${t.artists.join(', ')}`,
+                    spotifyPlaylistId: this._playlistId,
+                    spotifyIndex: i,
+                    spotifyName: t.name,
+                    spotifyArtists: t.artists,
+                    spotifyId: t.id,
+                    requestedBy: this._lastRequester,
+                    source: 'Spotify',
+                    thumbnail: t.album?.images?.[0]?.url
+                });
+
+                this._playlistPointer = i + 1;
+            }
+
+            for (const track of tracksToEnqueue) {
+                this.enqueue(track, false);
+            }
+
+            console.log('[GuildPlayer] Shuffled playlist, loaded', tracksToEnqueue.length, 'tracks instantly. Current track continues playing.');
+        } else {
+            console.log('[GuildPlayer] Shuffling current queue:', this.queue.length, 'tracks');
+
+            for (let i = this.queue.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [this.queue[i], this.queue[j]] = [this.queue[j], this.queue[i]];
+            }
+
+            console.log('[GuildPlayer] Queue shuffled. Current track continues playing.');
         }
     }
+
+    public queueMessageId?: string;
+    public queueChannelId?: string;
+
+    public async deleteQueueMessage(client: Client) {
+        if (this.queueMessageId && this.queueChannelId) {
+            try {
+                const channel = await client.channels.fetch(this.queueChannelId);
+                if (channel && channel.isTextBased()) {
+                    const msg = await channel.messages.fetch(this.queueMessageId);
+                    await msg.delete();
+                }
+            } catch { }
+            this.queueMessageId = undefined;
+            this.queueChannelId = undefined;
+        }
+    }
+
+    public resetQueue() {
+        this.queue = [];
+        this.currentTrack = null;
+        if (this.player) {
+            this.player.stop(true);
+        }
+    }
+
+    public ensureVoiceConnection(): boolean {
+        if (!this.voiceChannel) {
+            console.log('[GuildPlayer] No voice channel set');
+            return false;
+        }
+
+        const currentState = this.connection?.state.status;
+
+        if (!this.connection ||
+            currentState === VoiceConnectionStatus.Disconnected ||
+            currentState === VoiceConnectionStatus.Destroyed) {
+
+            console.log('[GuildPlayer] Reconnecting to voice channel:', this.voiceChannel.name);
+
+            try {
+                this.connection = joinVoiceChannel({
+                    channelId: this.voiceChannel.id,
+                    guildId: this.voiceChannel.guild.id,
+                    adapterCreator: this.voiceChannel.guild.voiceAdapterCreator as any,
+                });
+
+                this.connection.on(VoiceConnectionStatus.Disconnected, async () => {
+                    console.log('[GuildPlayer] Voice connection disconnected');
+                    try {
+                        await Promise.race([
+                            entersState(this.connection!, VoiceConnectionStatus.Signalling, 5_000),
+                            entersState(this.connection!, VoiceConnectionStatus.Connecting, 5_000),
+                        ]);
+                    } catch (error) {
+                        console.log('[GuildPlayer] Voice connection destroyed after timeout');
+                        this.connection?.destroy();
+                    }
+                });
+
+                if (this.player) {
+                    this.connection.subscribe(this.player);
+                }
+                return true;
+            } catch (e) {
+                console.error('[GuildPlayer] Failed to reconnect:', e);
+                return false;
+            }
+        }
+
+        return true;
+    }
+}
+
+function shuffleArray<T>(array: T[]): T[] {
+    const arr = array.slice();
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
 }

@@ -9,7 +9,6 @@ const commands = [
     new SlashCommandBuilder().setName('skip').setDescription('Salta la traccia corrente'),
     new SlashCommandBuilder().setName('stop').setDescription('Ferma la musica'),
     new SlashCommandBuilder().setName('queue').setDescription('Mostra la coda'),
-    // aggiungi altri comandi qui
 ].map(cmd => cmd.toJSON());
 
 const token = process.env.DISCORD_TOKEN!;

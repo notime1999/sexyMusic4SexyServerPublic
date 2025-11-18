@@ -18,7 +18,7 @@ export async function ensureSpotifyToken() {
         throw new Error('Missing Spotify credentials');
     }
     const now = Date.now();
-    if (spotifyTokenObtainedAt + (spotifyTokenTtl - 60000) > now) return; // still valid (with 60s margin)
+    if (spotifyTokenObtainedAt + (spotifyTokenTtl - 60000) > now) return;
     const data = await spotifyApi.clientCredentialsGrant();
     spotifyApi.setAccessToken(data.body['access_token']);
     spotifyTokenObtainedAt = Date.now();
@@ -28,19 +28,14 @@ export async function ensureSpotifyToken() {
 
 function extractSpotifyId(url: string) {
     if (!url) return null;
-    // remove query params and locale segments
     try {
         const u = new URL(url);
-        const parts = u.pathname.split('/').filter(Boolean); // e.g. ["intl-it","track","<id>"] or ["track","<id>"]
-        // find the segment 'track'|'playlist'|'album'
+        const parts = u.pathname.split('/').filter(Boolean);
         const idx = parts.findIndex(p => ['track', 'playlist', 'album'].includes(p));
         if (idx >= 0 && parts[idx + 1]) {
             return { type: parts[idx], id: parts[idx + 1] };
         }
-    } catch (e) {
-        // not a full URL, maybe just id
-    }
-    // fallback regex
+    } catch (e) {}
     const m = url.match(/(?:track|playlist|album)[:\/]([A-Za-z0-9]+)/);
     if (m) return { type: url.includes('track') ? 'track' : url.includes('playlist') ? 'playlist' : 'album', id: m[1] };
     return null;
@@ -48,7 +43,6 @@ function extractSpotifyId(url: string) {
 
 export async function searchSpotify(query: string): Promise<{ url?: string; title?: string } | null> {
     try {
-        // If it's a Spotify URL -> resolve metadata then search YouTube
         if (/spotify\.com/.test(query)) {
             const info = extractSpotifyId(query);
             if (!info) return null;
@@ -60,7 +54,7 @@ export async function searchSpotify(query: string): Promise<{ url?: string; titl
                 const q = `${track.name} ${track.artists.map((a: any) => a.name).join(' ')}`;
                 const r = await yts(q);
                 const v = r?.videos?.[0];
-                if (v) return { url: v.url, title: `${track.name} - ${track.artists.map((a: any)=>a.name).join(', ')}` };
+                if (v) return { url: v.url, title: `${track.name} - ${track.artists.map((a: any) => a.name).join(', ')}` };
             }
 
             if (info.type === 'playlist') {
@@ -70,7 +64,7 @@ export async function searchSpotify(query: string): Promise<{ url?: string; titl
                     const q = `${first.name} ${first.artists.map((a: any) => a.name).join(' ')}`;
                     const r = await yts(q);
                     const v = r?.videos?.[0];
-                    if (v) return { url: v.url, title: `${first.name} - ${first.artists.map((a:any)=>a.name).join(', ')}` };
+                    if (v) return { url: v.url, title: `${first.name} - ${first.artists.map((a: any) => a.name).join(', ')}` };
                 }
             }
 
@@ -88,7 +82,6 @@ export async function searchSpotify(query: string): Promise<{ url?: string; titl
             return null;
         }
 
-        // Not a Spotify link -> let caller fallback to YouTube search
         return null;
     } catch (err) {
         console.error('[spotify] search error', err);
@@ -108,7 +101,7 @@ export async function searchYouTube(query: string): Promise<{ url?: string; titl
     }
 }
 
-export async function getPlaylistTracks(urlOrId: string): Promise<{ name: string; artists: string[] }[]> {
+export async function getPlaylistTracks(urlOrId: string): Promise<any[]> {
     let playlistId = urlOrId;
     const m = urlOrId.match(/playlist\/([A-Za-z0-9]+)/);
     if (m && m[1]) playlistId = m[1];
@@ -117,7 +110,7 @@ export async function getPlaylistTracks(urlOrId: string): Promise<{ name: string
 
     const limit = 100;
     let offset = 0;
-    const results: { name: string; artists: string[] }[] = [];
+    const results: any[] = [];
 
     while (true) {
         let res: any;
@@ -133,8 +126,11 @@ export async function getPlaylistTracks(urlOrId: string): Promise<{ name: string
             const track = it.track;
             if (!track) continue;
             results.push({
+                id: track.id,
                 name: track.name,
                 artists: (track.artists ?? []).map((a: any) => a.name),
+                url: track.external_urls?.spotify,
+                album: track.album
             });
         }
 
@@ -152,7 +148,6 @@ export async function getPlaylistSummary(urlOrId: string): Promise<{ total: numb
     await ensureSpotifyToken();
 
     try {
-        // Request playlist metadata (tracks.total and first item)
         const res: any = await spotifyApi.getPlaylist(info.id, { limit: 1 });
         const total = res.body?.tracks?.total ?? 0;
         const firstItem = res.body?.tracks?.items?.[0]?.track;
@@ -171,7 +166,6 @@ export async function getPlaylistTrackAt(urlOrId: string, index: number): Promis
     if (!info || info.type !== 'playlist') return null;
     await ensureSpotifyToken();
     try {
-        // request only one track at the desired offset
         const res: any = await spotifyApi.getPlaylistTracks(info.id, { limit: 1, offset: index });
         const item = res.body?.items?.[0]?.track;
         if (!item) return null;

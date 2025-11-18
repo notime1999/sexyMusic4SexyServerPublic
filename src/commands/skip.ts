@@ -4,11 +4,11 @@ import GuildPlayer from '../audio/guildPlayer';
 export const execute = async (interaction: ChatInputCommandInteraction) => {
     const member = interaction.member as GuildMember;
     if (!member || !member.voice?.channel) {
-        return interaction.reply('Devi essere in un canale vocale per usare skip.');
+        return interaction.reply('You must be in a voice channel to use skip.');
     }
     const voiceChannel = member.voice.channel;
     const gp = GuildPlayer.get(voiceChannel.guild.id);
-    if (!gp) return interaction.reply('Nessuna musica in riproduzione.');
+    if (!gp) return interaction.reply('No music playing.');
 
     gp.skip();
 
@@ -17,7 +17,7 @@ export const execute = async (interaction: ChatInputCommandInteraction) => {
         if (nowPlaying) {
             interaction.reply(`Skipped. Now playing: ${nowPlaying.title}`);
         } else {
-            interaction.reply('Skipped. Nessuna traccia in coda.');
+            interaction.reply('Skipped. No tracks in queue.');
         }
     }, 500);
 };
