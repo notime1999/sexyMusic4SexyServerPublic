@@ -79,6 +79,12 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
         console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist);
 
         if (isYouTubePlaylist) {
+            // Verifica cookies.txt PRIMA di procedere
+            const cookiesOk = await checkCookiesFile(interaction.channel);
+            if (!cookiesOk) {
+                return interaction.editReply('⚠️ Cookie file non valido o mancante. Impossibile riprodurre la playlist YouTube.');
+            }
+
             const playlistId = await ytpl.getPlaylistID(query);
             console.log('[play] playlistId=', playlistId);
             const playlist = await ytpl(playlistId, { pages: Infinity });
