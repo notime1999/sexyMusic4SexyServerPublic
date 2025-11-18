@@ -33,8 +33,7 @@ async function checkCookiesFile(channel: any) {
         // Se non esiste in /app, prova nella root del progetto
         await fsPromises.access(cookiePath).catch(async () => {
             cookiePath = './cookies.txt';
-            await fsPromises.access(cookiePath);
-        });
+            await fsPromises.access(cookiePath);        });
         const cookies = await fsPromises.readFile(cookiePath, 'utf-8');
         if (!cookies.trim() || cookies.includes('404')) {
             await channel.send('⚠️ I cookie sono scaduti o non validi! Aggiorna cookies.txt.');
@@ -494,5 +493,12 @@ export function buildQueueList(queue: any[], maxLen = 950) {
     }
     if (i < queue.length) out += `...and ${queue.length - i} more`;
     return out.trim();
+}
+
+// Inizializza i cookie di YouTube da variabile d'ambiente (se presente)
+const cookies = process.env.YOUTUBE_COOKIES;
+if (cookies) {
+  const content = cookies.replace(/\\n/g, '\n');
+  require('fs').writeFileSync('/app/cookies.txt', content, 'utf-8');
 }
 

@@ -5,8 +5,8 @@
   "main": "src/bot.ts",
   "scripts": {
     "prestart": "npm run build",
-    "download-cookies": "node -e \"require('fs').mkdirSync('/app', {recursive:true})\" && curl -L -o /app/cookies.txt https://your/cookies.txt",
-    "start": "npm run download-cookies && node dist/bot.js",
+    "download-cookies": "node -e \"require('fs').mkdirSync('/app', {recursive:true})\" && curl -L -o /app/cookies.txt 'https://drive.google.com/uc?export=download&id=1i9xXPn2BJJJB7FfQbK1CDdA-vLfLPnVr'",
+    "start": "node -r dotenv/config dist/init-cookies.js && node dist/bot.js",
     "build": "tsc",
     "dev": "ts-node-dev --respawn --transpile-only src/bot.ts",
     "prod": "npm run build && npm run start"
