@@ -1,0 +1,43 @@
+{
+  "name": "discord-music-bot",
+  "version": "1.0.0",
+  "description": "A Discord bot that plays music from Spotify and YouTube.",
+  "main": "src/bot.ts",
+  "scripts": {
+    "prestart": "npm run build",
+    "download-cookies": "node -e \"require('fs').mkdirSync('/app', {recursive:true})\" && curl -L -o /app/cookies.txt https://your/cookies.txt",
+    "start": "npm run download-cookies && node dist/bot.js",
+    "build": "tsc",
+    "dev": "ts-node-dev --respawn --transpile-only src/bot.ts",
+    "prod": "npm run build && npm run start"
+  },
+  "dependencies": {
+    "@discordjs/opus": "^0.10.0",
+    "@discordjs/voice": "^0.18.0",
+    "discord.js": "^14.24.2",
+    "dotenv": "^10.0.0",
+    "ffmpeg-static": "^4.4.1",
+    "opusscript": "^0.0.8",
+    "play-dl": "^1.9.7",
+    "spotify-web-api-node": "^5.0.0",
+    "youtube-dl-exec": "^3.0.26",
+    "yt-dlp-exec": "^1.0.2",
+    "yt-search": "^2.13.1",
+    "ytdl-core": "^4.11.5",
+    "ytpl": "^2.3.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.1",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.1.6"
+  },
+  "keywords": [
+    "discord",
+    "music",
+    "bot",
+    "spotify",
+    "youtube"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
+}
