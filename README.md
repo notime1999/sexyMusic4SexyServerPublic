@@ -65,7 +65,7 @@ npm run build
 
 6. Deploy slash commands:
 ```bash
-npm run deploy-commands
+node dist/commands/deploy-commands.js
 ```
 
 7. Start the bot:
@@ -165,5 +165,6 @@ Pull requests are welcome! For major changes, please open an issue first to disc
 MIT
 
 ## Credits
+
 
 Built with ❤️ for music lovers on Discord
