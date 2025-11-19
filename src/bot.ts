@@ -15,6 +15,13 @@ import { execute as skip } from './commands/skip';
 import { execute as stop } from './commands/stop';
 import { execute as queue } from './commands/queue';
 
+// Define commands map - accept any return type
+const commands = new Map<string, { execute: (interaction: any, args?: string[]) => Promise<any> }>();
+commands.set('play', { execute: play });
+commands.set('skip', { execute: skip });
+commands.set('stop', { execute: stop });
+commands.set('queue', { execute: queue });
+
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
@@ -28,7 +35,7 @@ client.on('messageCreate', (msg) => {
     console.log('Message received:', msg.content);
 });
 
-client.on('interactionCreate', async interaction => {
+client.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
         const guildId = interaction.guildId;
         const gp = GuildPlayer.get(guildId!);
@@ -124,19 +131,29 @@ client.on('interactionCreate', async interaction => {
         return;
     }
 
-    if (interaction.isChatInputCommand()) {
-        if (interaction.commandName === 'play') {
-            const query = interaction.options.getString('query', true);
-            await play(interaction, [query]);
-        }
-        if (interaction.commandName === 'skip') {
-            await skip(interaction);
-        }
-        if (interaction.commandName === 'stop') {
-            await stop(interaction);
-        }
-        if (interaction.commandName === 'queue') {
-            await queue(interaction);
+    if (!interaction.isChatInputCommand()) return;
+
+    const command = commands.get(interaction.commandName);
+    if (!command) return;
+
+    const args = interaction.options.data.map((option: any) => {
+        if (option.value !== undefined) return String(option.value);
+        return '';
+    }).filter(Boolean);
+
+    try {
+        // CALL COMMAND IMMEDIATELY - NO DELAYS
+        await command.execute(interaction, args);
+    } catch (error) {
+        console.error('Error executing command:', error);
+        try {
+            if (interaction.deferred || interaction.replied) {
+                await interaction.followUp({ content: 'There was an error executing this command!', ephemeral: true });
+            } else {
+                await interaction.reply({ content: 'There was an error executing this command!', ephemeral: true });
+            }
+        } catch (e) {
+            console.error('Failed to send error message:', e);
         }
     }
 });

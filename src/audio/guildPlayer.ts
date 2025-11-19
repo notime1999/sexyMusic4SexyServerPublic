@@ -1,6 +1,5 @@
 import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayer, AudioPlayerStatus, NoSubscriberBehavior, entersState, VoiceConnection, VoiceConnectionStatus, createAudioResource as createRes, StreamType, AudioResource } from '@discordjs/voice';
 import playdl from 'play-dl';
-import ytdl from 'ytdl-core';
 import { VoiceBasedChannel, Client } from 'discord.js';
 import { getPlaylistTrackAt } from '../services/spotify';
 import { searchYouTube as searchSpotifyYT } from '../services/spotify';
@@ -8,7 +7,7 @@ import { searchYouTube as searchYouTubeService } from '../services/youtube';
 import yts from 'yt-search';
 import path from 'path';
 import { spawn } from 'child_process';
-import { getPlaydlStream, streamWithYtDlp } from '../commands/play';
+import { Readable } from 'stream';
 
 export interface Track {
     url: string;
@@ -110,7 +109,7 @@ export default class GuildPlayer {
                 this.player = null;
                 this.playing = false;
                 this.currentTrack = null;
-                console.log(`[GuildPlayer] guild=${this.guildId} Disconnesso per inattività`);
+                console.log(`[GuildPlayer] guild=${this.guildId} Disconnected due to inactivity`);
             }, GuildPlayer.INACTIVITY_TIMEOUT);
         }
     }
@@ -150,6 +149,11 @@ export default class GuildPlayer {
             return;
         }
 
+        if (!this.player) {
+            console.error('[GuildPlayer] Player is not initialized');
+            return;
+        }
+
         if (this.queue.length === 0) {
             console.log('[GuildPlayer] Queue is empty');
             this.currentTrack = null;
@@ -160,32 +164,32 @@ export default class GuildPlayer {
         const track = this.queue.shift()!;
         this.currentTrack = track;
         console.log('[GuildPlayer] guild=' + this.guildId + ' playing next:', track.title);
+        console.log('[GuildPlayer] Track URL:', track.url); // DEBUG LOG
+
+        // VALIDATE URL
+        if (!track.url || track.url === 'undefined' || track.url.startsWith('spotify:')) {
+            console.error('[GuildPlayer] Invalid or missing URL for track:', track);
+            await this.playNext();
+            return;
+        }
 
         let resource: AudioResource | null = null;
 
         if (track.source === 'Spotify' && track.spotifyName && track.spotifyArtists) {
             console.log('[GuildPlayer] Spotify track detected, searching on YouTube...');
-
-            const { searchYouTube: searchSpotifyYT } = await import('../services/spotify');
-            const { searchYouTube: searchYouTubeService } = await import('../services/youtube');
+            
             const yts = (await import('yt-search')).default;
-
             const query = `${track.spotifyName} ${track.spotifyArtists.join(' ')} official audio`;
             let info = null;
-
+            
             try {
-                info = await searchSpotifyYT(query);
-                if (!info) info = await searchYouTubeService(query);
-
-                if (!info) {
-                    const r = await yts(query);
-                    const v = r?.videos?.[0];
-                    if (v) info = { url: v.url, title: v.title };
-                }
+                const r = await yts(query);
+                const v = r?.videos?.[0];
+                if (v) info = { url: v.url, title: v.title };
             } catch (e) {
                 console.error('[GuildPlayer] Failed to find YouTube URL for Spotify track:', e);
             }
-
+            
             if (info && info.url) {
                 track.url = info.url;
                 console.log('[GuildPlayer] Found YouTube URL:', info.url);
@@ -196,108 +200,52 @@ export default class GuildPlayer {
             }
         }
 
-        if (!track.url && track.spotifyName) {
-            const q = `${track.spotifyName} ${track.spotifyArtists?.join(' ') ?? ''}`.trim();
-            console.log(`[GuildPlayer] resolving placeholder: ${q}`);
-            let sInfo: { url?: string; title?: string } | null = null;
-            try { sInfo = await searchSpotifyYT(q); } catch (e) { sInfo = null; }
-            if (!sInfo || !sInfo.url) {
-                try { sInfo = await searchYouTubeService(q); } catch (e) { sInfo = null; }
-            }
-            if (!sInfo || !sInfo.url) {
-                try {
-                    const r = await yts(q);
-                    const v = r?.videos?.[0];
-                    if (v) sInfo = { url: v.url, title: v.title };
-                } catch (e) { /* ignore */ }
-            }
-            if (sInfo && sInfo.url) {
-                track.url = sInfo.url;
-                track.title = track.title ?? sInfo.title;
-                console.log(`[GuildPlayer] placeholder resolved -> ${track.url}`);
-            } else {
-                console.warn(`[GuildPlayer] could not resolve placeholder: ${q} — skipping`);
-                setImmediate(() => this.playNext().catch(err => console.error('[GuildPlayer] playNext error', err)));
-                return;
-            }
-        } else if (!track.url) {
-            console.warn(`[GuildPlayer] placeholder has no metadata to resolve, skipping`);
-            setImmediate(() => this.playNext().catch(err => console.error('[GuildPlayer] playNext error', err)));
+        // VALIDATE URL AGAIN AFTER SPOTIFY SEARCH
+        if (!track.url || track.url === 'undefined' || track.url.startsWith('spotify:')) {
+            console.error('[GuildPlayer] Still invalid URL after processing:', track.url);
+            await this.playNext();
             return;
-        }
-
-        console.log(`[GuildPlayer] guild=${this.guildId} playing next: ${track.title ?? track.url}`);
-        if (!this.connection || !this.player) {
-            console.warn(`[GuildPlayer] guild=${this.guildId} no connection/player available`);
-            return;
-        }
-
-        let streamObj: any = null;
-        if (!track.url) {
-            console.error('[GuildPlayer] track.url is undefined, skipping track:', track);
-            setImmediate(() => this.playNext().catch(e => console.error('[GuildPlayer] playNext error', e)));
-            return;
-        }
-        try {
-            const url = track.url!;
-            streamObj = await playdl.stream(url);
-        } catch (err) {
-            console.warn('[GuildPlayer] playdl.stream failed, will try yt-dlp fallback', err);
-            try {
-                streamObj = await streamWithYtDlp(track.url!);
-            } catch (err2) {
-                console.error('[GuildPlayer] all stream methods failed for', track.url, err2);
-                this.playing = false;
-                this.currentTrack = null;
-                setImmediate(() => this.playNext().catch(e => console.error('[GuildPlayer] playNext error', e)));
-                return;
-            }
         }
 
         try {
-            resource = createRes(streamObj.stream, {
-                inputType: streamObj.type === 'opus' ? StreamType.Opus : StreamType.Arbitrary,
-                inlineVolume: true,
+            // Use youtube-dl-exec - MOST RELIABLE
+            console.log('[GuildPlayer] Calling streamWithYoutubeDl with URL:', track.url);
+            const { streamWithYoutubeDl } = await import('../commands/play');
+            const streamResult = await streamWithYoutubeDl(track.url);
+            
+            if (!streamResult.stream) {
+                throw new Error('Stream is null or undefined');
+            }
+            
+            resource = createAudioResource(streamResult.stream, {
+                inputType: StreamType.Arbitrary,
+                inlineVolume: true
             });
+            
+            if (resource.volume) {
+                resource.volume.setVolume(0.5);
+            }
+            
+            console.log('[GuildPlayer] Created audio resource from youtube-dl-exec');
         } catch (err) {
-            console.error('[GuildPlayer] createAudioResource failed', err);
-            this.currentTrack = null;
-            setImmediate(() => this.playNext().catch(e => console.error('[GuildPlayer] playNext error', e)));
+            console.error('[GuildPlayer] youtube-dl-exec failed:', err);
+            await this.playNext();
             return;
         }
 
-        if (resource.volume) resource.volume.setVolume(0.8);
+        if (!resource) {
+            console.error('[GuildPlayer] Failed to create audio resource');
+            await this.playNext();
+            return;
+        }
 
         this.player.play(resource);
-        this.playing = true;
+        this.setPlaying(true);
 
-        // ensure connection ready
-        try { await entersState(this.connection, VoiceConnectionStatus.Ready, 15_000); } catch (e) { console.warn('[GuildPlayer] connection ready timeout', e); }
-        try { await entersState(this.player, AudioPlayerStatus.Playing, 5_000); } catch (e) { console.warn('[GuildPlayer] player playing timeout', e); }
-
-        if (this._playlistTracks && typeof this._playlistPointer === 'number') {
-            while (this.queue.length < 10 && this._playlistPointer < this._playlistTracks.length) {
-                const t = this._playlistTracks[this._playlistPointer];
-                const artists = Array.isArray(t.artists) ? t.artists : [];
-                const query = `${t.name} ${artists.join(' ')} official audio spotify`;
-                let info = await searchSpotifyYT(query) || await searchYouTubeService(query);
-                if (!info?.url) {
-                    console.warn(`[GuildPlayer] Skipping playlist track: no url found for "${query}"`);
-                    this._playlistPointer++;
-                    continue;
-                }
-                this.enqueue({
-                    url: info.url,
-                    title: info.title ?? t.name,
-                    spotifyPlaylistId: this._playlistId,
-                    spotifyIndex: this._playlistPointer,
-                    spotifyName: t.name,
-                    spotifyArtists: artists,
-                    requestedBy: this._lastRequester
-                });
-                this._playlistPointer++;
-            }
-        }
+        this.player.once(AudioPlayerStatus.Idle, async () => {
+            console.log('[GuildPlayer] Track ended, playing next...');
+            await this.playNext();
+        });
     }
 
     skip(): Track | null | false {

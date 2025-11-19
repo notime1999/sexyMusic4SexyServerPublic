@@ -15,4 +15,7 @@ RUN npm install
 
 COPY . .
 
+# Build TypeScript
+RUN npm run build
+
 CMD ["npm", "start"]

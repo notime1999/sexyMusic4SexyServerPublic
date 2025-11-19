@@ -8,43 +8,24 @@ import {
 } from 'discord.js';
 import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior, entersState, VoiceConnectionStatus, StreamType } from '@discordjs/voice';
 import playdl from 'play-dl';
-import ytdl from 'ytdl-core';
 import StreamManager from '../audio/streamManager';
 import { searchSpotify, searchYouTube as searchSpotifyYT, getPlaylistSummary } from '../services/spotify';
 import { searchYouTube as searchYouTubeService } from '../services/youtube';
 import ytpl from 'ytpl';
 // @ts-ignore
 import yts from 'yt-search';
-import { spawn } from 'child_process';
+import youtubedl from 'youtube-dl-exec';
 import path from 'path';
 import GuildPlayer from '../audio/guildPlayer';
 import { ensureSpotifyToken } from '../services/spotify';
 import spotifyApi from '../services/spotify';
 import { getPlaylistTracks } from '../services/spotify';
-import os from 'os';
-import fs from 'fs';
+import { spawn } from 'child_process';
+import { Readable, PassThrough } from 'stream';
 import fsPromises from 'fs/promises';
 
 const streamManager = new StreamManager();
 
-(async () => {
-    try {
-        const cookiePath = fs.existsSync('./cookies.txt') ? './cookies.txt' : '/app/cookies.txt';
-        if (fs.existsSync(cookiePath)) {
-            const cookies = await fsPromises.readFile(cookiePath, 'utf-8');
-            await playdl.setToken({
-                youtube: {
-                    cookie: cookies
-                }
-            });
-            console.log('[play-dl] YouTube cookies loaded');
-        } else {
-            console.warn('[play-dl] No cookies.txt found, will use fallback methods');
-        }
-    } catch (e) {
-        console.error('[play-dl] Cookie init failed:', e);
-    }
-})();
 
 async function checkCookiesFile(channel: any) {
     let cookiePath = './cookies.txt';
@@ -66,16 +47,13 @@ async function checkCookiesFile(channel: any) {
 }
 
 export const execute = async (interaction: ChatInputCommandInteraction, args: string[] = []) => {
-    await interaction.deferReply();
-    let replyUpdated = false;
-
-    setTimeout(async () => {
-        if (!replyUpdated) {
-            try {
-                await interaction.deleteReply();
-            } catch { }
-        }
-    }, 60000);
+    // DEFER IMMEDIATELY - FIRST THING!
+    try {
+        await interaction.deferReply();
+    } catch (e) {
+        console.error('[play] Failed to defer reply:', e);
+        return;
+    }
 
     console.log("EXECUTING PLAY", Date.now(), interaction.id, interaction.commandName, args);
     let query = args.join(' ').trim();
@@ -87,55 +65,74 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
     console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist);
 
+    // Check if user is in voice channel AFTER defer
+    const member = interaction.member as GuildMember;
+    if (!member || !member.voice?.channel) {
+        return interaction.editReply('You must be in a voice channel to play music.');
+    }
+
+    let replyUpdated = false;
+
+    setTimeout(async () => {
+        if (!replyUpdated) {
+            try {
+                await interaction.deleteReply();
+            } catch { }
+        }
+    }, 60000);
+
     if (isYouTubePlaylist) {
-        let playlistId: string | null = null;
-
-        const playlistMatch = query.match(/[?&]list=([^&]+)/);
-        if (playlistMatch) {
-            playlistId = playlistMatch[1];
-        }
-
-        if (!playlistId) {
-            return interaction.editReply('Cannot extract YouTube playlist ID.');
-        }
-
         console.log('[play] YouTube playlist ID:', playlistId);
-
+        
         try {
-            const member = interaction.member as GuildMember;
-            if (!member || !member.voice?.channel) {
-                return interaction.reply('You must be in a voice channel to play music.');
-            }
-            const voiceChannel = member.voice.channel;
-            const gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
-            if (!gp.startedBy) {
-                gp.startedBy = interaction.member?.user?.username || interaction.user.username;
-            }
+            // Use youtube-dl-exec to get playlist info
+            const playlistInfo: any = await youtubedl(query, {
+                dumpSingleJson: true,
+                noWarnings: true,
+                flatPlaylist: true,
+                skipDownload: true,
+                playlistEnd: 50  // LIMIT TO 50 VIDEOS MAX
+            });
 
-            const playlist = await playdl.playlist_info(`https://www.youtube.com/playlist?list=${playlistId}`, { incomplete: true });
-            const videos = await playlist.all_videos();
-
+            const videos = playlistInfo?.entries || [];
             console.log('[play] Found', videos.length, 'videos in YouTube playlist');
 
+            if (videos.length === 0) {
+                return interaction.editReply('❌ No videos found in playlist.');
+            }
+
+            const gp = GuildPlayer.create(interaction.guild!.id, member.voice.channel);
+            gp.startedBy = interaction.user.username;
+            gp.lastAction = `YouTube playlist with ${videos.length} songs`;
+
             for (const video of videos) {
-                const videoId = video.url?.match(/[?&]v=([^&]+)/)?.[1];
-                const thumbnail = videoId ? `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg` : undefined;
+                if (!video || !video.id) continue;
                 
-                gp.enqueue({
-                    url: video.url,
-                    title: video.title ?? 'Unknown',
+                // Get best thumbnail URL
+                let thumbnail = `https://img.youtube.com/vi/${video.id}/maxresdefault.jpg`;
+                if (video.thumbnail) {
+                    thumbnail = video.thumbnail;
+                } else if (video.thumbnails && video.thumbnails.length > 0) {
+                    thumbnail = video.thumbnails[video.thumbnails.length - 1].url;
+                }
+                
+                const track = {
+                    url: `https://www.youtube.com/watch?v=${video.id}`,
+                    title: video.title || video.id || 'Unknown Title',
                     requestedBy: interaction.user.username,
-                    source: 'YouTube',
-                    thumbnail
-                }, false); 
+                    source: 'YouTube' as const,
+                    thumbnail: thumbnail
+                };
+                
+                gp.enqueue(track, false);
             }
 
-            if (!gp.getCurrent()) {
-                await gp.playNext();
-            }
+            await gp.playNext();
 
+            // DELETE OLD QUEUE MESSAGE
             await gp.deleteQueueMessage(interaction.client);
 
+            // BUILD EMBED
             const nowPlaying = gp.getCurrent();
             const maxQueueToShow = 10;
             const more = gp.queue.length > maxQueueToShow ? `\n...and ${gp.queue.length - maxQueueToShow} more` : '';
@@ -143,12 +140,10 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             if (!queueStr.trim()) queueStr = 'No tracks in queue.';
             if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
 
-            const startedBy = gp.startedBy || 'Unknown';
-
             const fields = [
                 { name: 'Now playing', value: nowPlaying?.title ?? 'Nothing' },
                 { name: 'Queue', value: queueStr },
-                { name: 'Started by', value: startedBy, inline: true }
+                { name: 'Started by', value: gp.startedBy || 'Unknown', inline: true }
             ];
             if (gp.lastAction) {
                 fields.push({ name: 'Last action', value: gp.lastAction, inline: true });
@@ -156,15 +151,12 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
             const embed = new EmbedBuilder()
                 .setTitle('Music Queue')
-                .addFields(fields);
+                .addFields(fields)
+                .setColor(0x00FF00);
 
+            // Always set thumbnail from now playing
             if (nowPlaying?.thumbnail) {
                 embed.setThumbnail(nowPlaying.thumbnail);
-            } else if (nowPlaying?.url && nowPlaying.url.includes('youtube.com')) {
-                const videoId = nowPlaying.url.match(/[?&]v=([^&]+)/)?.[1];
-                if (videoId) {
-                    embed.setThumbnail(`https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`);
-                }
             }
 
             const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -178,18 +170,14 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             const sent = await interaction.fetchReply();
             gp.queueMessageId = sent.id;
             gp.queueChannelId = sent.channelId;
-            return;
-        } catch (e) {
-            console.error('[play] YouTube playlist error:', e);
-            return interaction.editReply('Error loading YouTube playlist.');
+        } catch (error) {
+            console.error('[play] Failed to fetch YouTube playlist:', error);
+            return interaction.editReply('❌ Failed to fetch YouTube playlist. Please try again.');
         }
+        return;
     }
 
     if (isSpotifyPlaylist) {
-        const member = interaction.member as GuildMember;
-        if (!member || !member.voice?.channel) {
-            return interaction.reply('You must be in a voice channel to play music.');
-        }
         const voiceChannel = member.voice.channel;
         const gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
         
@@ -319,11 +307,6 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
         return interaction.editReply('Could not find any results for your query.');
     }
 
-    const member = interaction.member as GuildMember;
-    if (!member || !member.voice?.channel) {
-        return interaction.editReply('You must be in a voice channel to play music.');
-    }
-
     const voiceChannel = member.voice.channel;
 
     const gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
@@ -408,130 +391,41 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     gp.queueChannelId = sent.channelId;
 };
 
-export async function getPlaydlStream(url: string) {
+// YOUTUBE-DL-EXEC - NO COOKIES NEEDED
+export async function streamWithYoutubeDl(url: string) {
+    console.log('[play] Using youtube-dl-exec for:', url);
+    
     try {
-        const isHttp = typeof url === 'string' && /^https?:\/\//i.test(url);
-        if (isHttp) {
-            console.log('[play] getPlaydlStream: trying direct url:', url);
-            try {
-                const s = await playdl.stream(url);
-                console.log('[play] direct stream OK, type=', (s as any)?.type);
-                return s;
-            } catch (err) {
-                console.warn('[play] direct playdl.stream failed, will try other fallbacks:', err);
-            }
+        const info: any = await youtubedl(url, {
+            dumpSingleJson: true,
+            noCheckCertificates: true,
+            noWarnings: true,
+            preferFreeFormats: true,
+            addHeader: ['referer:youtube.com', 'user-agent:googlebot']
+        });
+
+        if (!info || typeof info === 'string') {
+            throw new Error('Invalid response from youtube-dl-exec');
         }
 
-        const valid = playdl.yt_validate(url);
+        const audioFormat = info.formats?.find((f: any) => 
+            f.acodec !== 'none' && f.vcodec === 'none'
+        ) || info.formats?.find((f: any) => f.acodec !== 'none');
 
-        if (valid === 'video') {
-            let info: any = null;
-            try { info = await playdl.video_info(url); } catch (e) { info = null; }
-            const videoUrl = info?.video_details?.url ?? url;
-            if (videoUrl && /^https?:\/\//i.test(videoUrl)) {
-                console.log('[play] video_info url=', videoUrl);
-                try {
-                    return await playdl.stream(videoUrl);
-                } catch (err) {
-                    console.warn('[play] playdl.stream(video) failed, will fallback to yts:', err);
-                    const r = await yts({ videoId: videoUrl.match(/[?&]v=([^&]+)/)?.[1] });
-                    if (r?.videos?.[0]?.url) {
-                        return await playdl.stream(r.videos[0].url);
-                    }
-                    throw err;
-                }
-            }
+        if (!audioFormat || !audioFormat.url) {
+            throw new Error('No audio format found');
         }
 
-        if (valid === 'playlist') {
-            let pl: any = null;
-            try { pl = await playdl.playlist_info(url); } catch (e) { pl = null; }
-            const first = (pl as any)?.videos?.[0];
-            const firstUrl = first?.url ?? first?.link ?? first?.shortUrl;
-            if (firstUrl && /^https?:\/\//i.test(firstUrl)) {
-                console.log('[play] playlist firstUrl=', firstUrl);
-                try {
-                    return await playdl.stream(firstUrl);
-                } catch (err) {
-                    console.warn('[play] playdl.stream(playlist first) failed, fallback to yts:', err);
-                    const r = await yts({ videoId: firstUrl.match(/[?&]v=([^&]+)/)?.[1] });
-                    if (r?.videos?.[0]?.url) {
-                        return await playdl.stream(r.videos[0].url);
-                    }
-                    throw err;
-                }
-            }
-        }
-
-        let results: any[] = [];
-        try { results = (await playdl.search(url)) as any[]; } catch (e) { results = []; }
-        if (results && results.length > 0) {
-            const candidateUrl = results[0].url ?? results[0].link ?? results[0].shortUrl;
-            if (candidateUrl && /^https?:\/\//i.test(candidateUrl)) {
-                console.log('[play] search candidateUrl=', candidateUrl);
-                try {
-                    return await playdl.stream(candidateUrl);
-                } catch (err) {
-                    console.warn('[play] playdl.stream(search candidate) failed, fallback to yts:', err);
-                    const r = await yts(url);
-                    const v = r?.videos?.[0];
-                    if (v?.url) {
-                        return await playdl.stream(v.url);
-                    }
-                    throw err;
-                }
-            }
-        }
-
-        try {
-            const r = await yts(url);
-            const v = r?.videos?.[0];
-            if (v?.url && /^https?:\/\//i.test(v.url)) {
-                console.log('[play] yts fallback url=', v.url);
-                return await playdl.stream(v.url);
-            }
-        } catch (e) {
-            /* ignore */
-        }
-
-        throw new Error('No playable URL found');
+        console.log('[play] Found audio URL from youtube-dl-exec');
+        
+        const response = await fetch(audioFormat.url);
+        if (!response.ok) throw new Error('Failed to fetch audio stream');
+        
+        return { stream: Readable.fromWeb(response.body as any), type: 'arbitrary' as const };
     } catch (err) {
-        console.error('getPlaydlStream error for:', url, err);
+        console.error('[play] youtube-dl-exec failed:', err);
         throw err;
     }
-}
-
-export async function streamWithYtDlp(url: string) {
-    let bin = 'yt-dlp';
-    if (process.platform === 'win32') {
-        const localBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'yt-dlp.exe');
-        try {
-            require('fs').accessSync(localBin);
-            bin = localBin;
-        } catch {
-            bin = 'yt-dlp.exe';
-        }
-    }
-    console.log('[play] using yt-dlp binary (spawn):', bin);
-
-    const cookiePath = path.resolve('./cookies.txt');
-
-    const args = [
-        '--cookies', cookiePath,
-        '-f', 'bestaudio/best',
-        '-o', '-',
-        '--no-playlist',
-        '--extractor-args', 'youtube:player_client=default',
-        url,
-    ];
-
-    const proc = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-    proc.stderr?.on('data', (d: Buffer) => console.warn('[yt-dlp]', d.toString().trim()));
-    proc.on('error', (err: any) => console.error('[yt-dlp] spawn error:', err));
-    proc.on('close', (code: number) => console.log('[yt-dlp] closed with code', code));
-
-    return { stream: proc.stdout, type: 'unknown' as const };
 }
 
 function extractSpotifyPlaylistId(url: string): string | null {
@@ -549,9 +443,208 @@ function extractSpotifyPlaylistId(url: string): string | null {
 
 export function buildQueueList(tracks: any[]): string {
     return tracks.map((t, i) => {
-        const urlDisplay = (t.url && !t.url.startsWith('spotify:')) ? ` (${t.url})` : '';
+        const urlDisplay = (t.url && !t.url.startsWith('spotify:')) ? `` : '';
         const sourceTag = t.source ? ` [${t.source}]` : '';
         return `${i + 1}. ${t.title}${sourceTag}${urlDisplay}`;
     }).join('\n');
 }
 
+// USE YT-DLP WITH PUBLIC PROXY - NO COOKIES NEEDED
+export async function streamWithYtDlp(url: string) {
+    console.log('[play] Using yt-dlp binary with proxy for:', url);
+    
+    return new Promise<{ stream: Readable; type: any }>((resolve, reject) => {
+        const ytDlp = spawn('yt-dlp', [
+            '-f', 'bestaudio',
+            '-o', '-',
+            '--no-warnings',
+            '--no-playlist',
+            '--format-sort', 'acodec:opus',
+            '--proxy', 'socks5://proxy.soax.com:1080', // Free SOCKS5 proxy
+            '--socket-timeout', '30',
+            '--retries', '3',
+            '--extractor-args', 'youtube:player_client=android',
+            '--extractor-args', 'youtube:player_skip=webpage',
+            '--user-agent', 'com.google.android.youtube/19.09.37 (Linux; U; Android 14)',
+            url
+        ]);
+
+        const stream = new PassThrough();
+        
+        ytDlp.stdout.pipe(stream);
+        
+        ytDlp.stderr.on('data', (data) => {
+            console.log('[yt-dlp]', data.toString());
+        });
+
+        ytDlp.on('error', (err) => {
+            console.error('[yt-dlp] spawn error:', err);
+            reject(err);
+        });
+
+        ytDlp.on('close', (code) => {
+            if (code !== 0 && code !== null) {
+                console.error('[yt-dlp] exited with code:', code);
+                reject(new Error(`yt-dlp exited with code ${code}`));
+            }
+        });
+
+        // Wait a bit to ensure stream is ready
+        setTimeout(() => {
+            console.log('[play] yt-dlp stream ready');
+            resolve({ stream, type: StreamType.Arbitrary });
+        }, 1000);
+    });
+}
+
+// USE PIPED API WITH INVIDIOUS FALLBACK - STREAMING PROXY WITHOUT COOKIES
+export async function streamWithPiped(url: string) {
+    console.log('[play] Using Piped/Invidious API for:', url);
+    
+    try {
+        const videoId = url.match(/[?&]v=([^&]+)/)?.[1];
+        if (!videoId) throw new Error('Invalid YouTube URL');
+        
+        // Try Piped instances first
+        const pipedInstances = [
+            'https://pipedapi.kavin.rocks',
+            'https://pipedapi.adminforge.de',
+            'https://api-piped.mha.fi'
+        ];
+        
+        for (const instance of pipedInstances) {
+            try {
+                console.log('[Piped] Trying instance:', instance);
+                const proxyUrl = `${instance}/streams/${videoId}`;
+                const response = await fetch(proxyUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    },
+                    signal: AbortSignal.timeout(10000)
+                });
+                
+                if (!response.ok) {
+                    console.log('[Piped] Instance failed with status:', response.status);
+                    continue;
+                }
+                
+                const data = await response.json();
+                const audioStream = data.audioStreams?.find((s: any) => 
+                    s.quality === 'MEDIUM' || s.quality === 'HIGH'
+                ) || data.audioStreams?.[0];
+                
+                if (!audioStream || !audioStream.url) {
+                    console.log('[Piped] No audio stream found');
+                    continue;
+                }
+                
+                console.log('[Piped] Found audio stream:', audioStream.quality);
+                
+                const streamResponse = await fetch(audioStream.url, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                });
+                
+                if (!streamResponse.ok) {
+                    console.log('[Piped] Stream URL failed with status:', streamResponse.status);
+                    continue;
+                }
+                
+                console.log('[play] Piped stream created successfully');
+                return { 
+                    stream: Readable.fromWeb(streamResponse.body as any), 
+                    type: StreamType.Arbitrary 
+                };
+            } catch (err) {
+                console.log('[Piped] Instance error:', err);
+                continue;
+            }
+        }
+        
+        // Fallback to Invidious
+        console.log('[play] All Piped instances failed, trying Invidious...');
+        const invidiousInstances = [
+            'https://inv.tux.pizza',
+            'https://invidious.private.coffee',
+            'https://yt.artemislena.eu'
+        ];
+        
+        for (const instance of invidiousInstances) {
+            try {
+                console.log('[Invidious] Trying instance:', instance);
+                const apiUrl = `${instance}/api/v1/videos/${videoId}`;
+                const response = await fetch(apiUrl, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    },
+                    signal: AbortSignal.timeout(10000)
+                });
+                
+                if (!response.ok) {
+                    console.log('[Invidious] Instance failed with status:', response.status);
+                    continue;
+                }
+                
+                const data = await response.json();
+                const audioFormat = data.adaptiveFormats?.find((f: any) => 
+                    f.type?.includes('audio')
+                ) || data.formatStreams?.[0];
+                
+                if (!audioFormat || !audioFormat.url) {
+                    console.log('[Invidious] No audio format found');
+                    continue;
+                }
+                
+                console.log('[Invidious] Found audio format');
+                
+                const streamResponse = await fetch(audioFormat.url, {
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    }
+                });
+                
+                if (!streamResponse.ok) {
+                    console.log('[Invidious] Stream URL failed with status:', streamResponse.status);
+                    continue;
+                }
+                
+                console.log('[play] Invidious stream created successfully');
+                return { 
+                    stream: Readable.fromWeb(streamResponse.body as any), 
+                    type: StreamType.Arbitrary 
+                };
+            } catch (err) {
+                console.log('[Invidious] Instance error:', err);
+                continue;
+            }
+        }
+        
+        throw new Error('All Piped and Invidious instances failed');
+    } catch (err) {
+        console.error('[play] All proxies failed:', err);
+        throw err;
+    }
+}
+
+// USE PLAY-DL WITH CUSTOM AGENT - NO COOKIES NEEDED
+export async function streamWithPlayDl(url: string) {
+    console.log('[play] Using play-dl with custom agent for:', url);
+    
+    try {
+        // Set custom options for play-dl
+        playdl.setToken({
+            useragent: ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
+        });
+
+        const stream = await playdl.stream(url, {
+            quality: 2, // High quality
+        });
+        
+        console.log('[play] play-dl stream created successfully');
+        return { stream: stream.stream, type: stream.type };
+    } catch (err) {
+        console.error('[play] play-dl failed:', err);
+        throw err;
+    }
+}
