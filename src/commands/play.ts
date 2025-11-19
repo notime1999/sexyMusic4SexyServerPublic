@@ -27,6 +27,25 @@ import fsPromises from 'fs/promises';
 
 const streamManager = new StreamManager();
 
+(async () => {
+    try {
+        const cookiePath = fs.existsSync('./cookies.txt') ? './cookies.txt' : '/app/cookies.txt';
+        if (fs.existsSync(cookiePath)) {
+            const cookies = await fsPromises.readFile(cookiePath, 'utf-8');
+            await playdl.setToken({
+                youtube: {
+                    cookie: cookies
+                }
+            });
+            console.log('[play-dl] YouTube cookies loaded');
+        } else {
+            console.warn('[play-dl] No cookies.txt found, will use fallback methods');
+        }
+    } catch (e) {
+        console.error('[play-dl] Cookie init failed:', e);
+    }
+})();
+
 async function checkCookiesFile(channel: any) {
     let cookiePath = './cookies.txt';
     try {
@@ -414,8 +433,12 @@ export async function getPlaydlStream(url: string) {
                 try {
                     return await playdl.stream(videoUrl);
                 } catch (err) {
-                    console.warn('[play] playdl.stream(video) failed, will fallback to ytdl:', err);
-                    return await streamWithYtDlp(videoUrl);
+                    console.warn('[play] playdl.stream(video) failed, will fallback to yts:', err);
+                    const r = await yts({ videoId: videoUrl.match(/[?&]v=([^&]+)/)?.[1] });
+                    if (r?.videos?.[0]?.url) {
+                        return await playdl.stream(r.videos[0].url);
+                    }
+                    throw err;
                 }
             }
         }
@@ -430,8 +453,12 @@ export async function getPlaydlStream(url: string) {
                 try {
                     return await playdl.stream(firstUrl);
                 } catch (err) {
-                    console.warn('[play] playdl.stream(playlist first) failed, fallback to ytdl:', err);
-                    return await streamWithYtDlp(firstUrl);
+                    console.warn('[play] playdl.stream(playlist first) failed, fallback to yts:', err);
+                    const r = await yts({ videoId: firstUrl.match(/[?&]v=([^&]+)/)?.[1] });
+                    if (r?.videos?.[0]?.url) {
+                        return await playdl.stream(r.videos[0].url);
+                    }
+                    throw err;
                 }
             }
         }
@@ -445,8 +472,13 @@ export async function getPlaydlStream(url: string) {
                 try {
                     return await playdl.stream(candidateUrl);
                 } catch (err) {
-                    console.warn('[play] playdl.stream(search candidate) failed, fallback to ytdl:', err);
-                    return await streamWithYtDlp(candidateUrl);
+                    console.warn('[play] playdl.stream(search candidate) failed, fallback to yts:', err);
+                    const r = await yts(url);
+                    const v = r?.videos?.[0];
+                    if (v?.url) {
+                        return await playdl.stream(v.url);
+                    }
+                    throw err;
                 }
             }
         }
@@ -456,12 +488,7 @@ export async function getPlaydlStream(url: string) {
             const v = r?.videos?.[0];
             if (v?.url && /^https?:\/\//i.test(v.url)) {
                 console.log('[play] yts fallback url=', v.url);
-                try {
-                    return await playdl.stream(v.url);
-                } catch (err) {
-                    console.warn('[play] playdl.stream(yts) failed, fallback to ytdl:', err);
-                    return await streamWithYtDlp(v.url);
-                }
+                return await playdl.stream(v.url);
             }
         } catch (e) {
             /* ignore */
