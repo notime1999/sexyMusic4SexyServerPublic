@@ -22,30 +22,10 @@ import spotifyApi from '../services/spotify';
 import { getPlaylistTracks } from '../services/spotify';
 import { spawn } from 'child_process';
 import { Readable, PassThrough } from 'stream';
-import fsPromises from 'fs/promises';
+import fs from 'fs/promises';
 import { CookieManager } from '../services/cookieManager';
 
 const streamManager = new StreamManager();
-
-
-async function checkCookiesFile(channel: any) {
-    let cookiePath = './cookies.txt';
-    try {
-        await fsPromises.access(cookiePath).catch(async () => {
-            cookiePath = '/app/cookies.txt';
-            await fsPromises.access(cookiePath);
-        });
-        const cookies = await fsPromises.readFile(cookiePath, 'utf-8');
-        if (!cookies.trim() || cookies.includes('404') || cookies.includes('<html')) {
-            await channel.send('⚠️ Cookies are expired, invalid or file is not correct! Update cookies.txt.');
-            return false;
-        }
-        return true;
-    } catch (err) {
-        await channel.send('⚠️ Error reading cookies.txt!');
-        return false;
-    }
-}
 
 export const execute = async (interaction: ChatInputCommandInteraction, args: string[] = []) => {
     // DEFER IMMEDIATELY - FIRST THING!
@@ -626,40 +606,24 @@ export async function streamWithPiped(url: string) {
     }
 }
 
-export async function streamWithYoutubeDl(url: string) {
-    console.log('[play] Using youtube-dl-exec for:', url);
-    
+export async function streamWithYoutubeDl(videoUrl: string, retryWithFreshCookies = true): Promise<{ stream: Readable; title: string }> {
     try {
-        // Get fresh cookies from CookieManager
-        let cookiesPath: string | undefined;
-        try {
-            const cookieContent = await CookieManager.getCookies();
-            cookiesPath = './youtube-cookies.txt';
-            console.log('[play] Using dynamically fetched cookies');
-        } catch (err) {
-            console.log('[play] Failed to get cookies:', err);
-            console.log('[play] Proceeding without authentication');
-        }
-
-        // Build yt-dlp options
-        const options: any = {
-            dumpSingleJson: true,
-            noWarnings: true,
-            noCheckCertificates: true,
-            preferFreeFormats: true,
-            addHeader: ['referer:youtube.com', 'user-agent:googlebot']
-        };
-
-        // Add cookies if available
-        if (cookiesPath) {
-            options.cookies = cookiesPath;
-        }
-
-        // Get the best audio URL
-        const output = await youtubedl(url, options);
-
-        const info: any = output;
+        console.log('[play] Using youtube-dl-exec for:', videoUrl);
         
+        let cookiesString = await CookieManager.getCookies();
+        const cookiesFile = './temp-cookies.txt';
+        await fs.writeFile(cookiesFile, cookiesString, 'utf-8');
+        console.log('[play] Using dynamically fetched cookies');
+
+        const info: any = await youtubedl(videoUrl, {
+            dumpSingleJson: true,
+            noCheckCertificates: true,
+            noWarnings: true,
+            preferFreeFormats: true,
+            addHeader: ['referer:youtube.com', 'user-agent:Mozilla/5.0'],
+            cookies: cookiesFile,
+        });
+
         // Find best audio format
         let audioUrl: string | undefined;
         
@@ -700,11 +664,19 @@ export async function streamWithYoutubeDl(url: string) {
         console.log('[play] Audio stream response OK');
         
         return { 
-            stream: Readable.fromWeb(response.body as any), 
-            type: StreamType.Arbitrary 
+            stream: Readable.fromWeb(response.body as any),
+            title: info.title || 'Unknown Title'
         };
-    } catch (err) {
+    } catch (err: any) {
         console.error('[play] youtube-dl-exec failed:', err);
-        throw err;
+        
+        // RETRY WITH FRESH COOKIES IF FIRST ATTEMPT FAILS
+        if (retryWithFreshCookies && err?.message?.includes('Sign in to confirm')) {
+            console.log('[play] Cookie expired, fetching fresh ones and retrying...');
+            CookieManager.clearCache(); // Force refresh
+            return streamWithYoutubeDl(videoUrl, false); // Retry once
+        }
+        
+        throw new Error(`Failed to get YouTube stream: ${err?.message || 'Unknown error'}`);
     }
 }
