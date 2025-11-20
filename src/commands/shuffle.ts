@@ -10,7 +10,7 @@ export const execute = async (message: Message) => {
     }
     player.shuffleQueue(true);
 
-    const nowPlaying = player.getCurrentTrack();
+    const nowPlaying = player.getCurrent();
     const maxQueueToShow = 10;
     const more = player.queue.length > maxQueueToShow ? `\n...and ${player.queue.length - maxQueueToShow} more` : '';
     let queueList = "";

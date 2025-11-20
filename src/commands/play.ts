@@ -23,6 +23,7 @@ import { getPlaylistTracks } from '../services/spotify';
 import { spawn } from 'child_process';
 import { Readable, PassThrough } from 'stream';
 import fsPromises from 'fs/promises';
+import { CookieManager } from '../services/cookieManager';
 
 const streamManager = new StreamManager();
 
@@ -83,7 +84,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
     if (isYouTubePlaylist) {
         console.log('[play] YouTube playlist ID:', playlistId);
-        
+
         try {
             // Use youtube-dl-exec to get playlist info
             const playlistInfo: any = await youtubedl(query, {
@@ -107,7 +108,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
             for (const video of videos) {
                 if (!video || !video.id) continue;
-                
+
                 // Get best thumbnail URL
                 let thumbnail = `https://img.youtube.com/vi/${video.id}/maxresdefault.jpg`;
                 if (video.thumbnail) {
@@ -115,7 +116,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                 } else if (video.thumbnails && video.thumbnails.length > 0) {
                     thumbnail = video.thumbnails[video.thumbnails.length - 1].url;
                 }
-                
+
                 const track = {
                     url: `https://www.youtube.com/watch?v=${video.id}`,
                     title: video.title || video.id || 'Unknown Title',
@@ -123,7 +124,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
                     source: 'YouTube' as const,
                     thumbnail: thumbnail
                 };
-                
+
                 gp.enqueue(track, false);
             }
 
@@ -180,15 +181,15 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     if (isSpotifyPlaylist) {
         const voiceChannel = member.voice.channel;
         const gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
-        
+
         if (!gp.startedBy) {
             gp.startedBy = interaction.member?.user?.username || interaction.user.username;
         }
-        
+
         if (!gp.ensureVoiceConnection()) {
             return interaction.editReply('Cannot connect to voice channel.');
         }
-        
+
         const playlistId = extractSpotifyPlaylistId(query);
         let tracks: any[] = [];
         try {
@@ -204,11 +205,11 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
         const MAX_TRACKS = 10;
         const tracksToEnqueue: any[] = [];
-        
+
         for (let i = 0; i < tracks.length && tracksToEnqueue.length < MAX_TRACKS; i++) {
             const t = tracks[i];
             console.log(`[Spotify] Adding track ${tracksToEnqueue.length + 1}/${MAX_TRACKS}: ${t.name} - ${t.artists.join(', ')}`);
-            
+
             tracksToEnqueue.push({
                 url: t.url || `spotify:track:${t.id}`,
                 title: `${t.name} - ${t.artists.join(', ')}`,
@@ -227,20 +228,55 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             return interaction.editReply('No valid tracks in Spotify playlist.');
         }
 
-        for (const track of tracksToEnqueue) {
-            gp.enqueue(track, false);
+        // ==========================
+        // ENQUEUE TRACKS
+        // ==========================
+        console.log(`[play] Enqueuing ${tracksToEnqueue.length} tracks`);
+        for (const t of tracksToEnqueue) {
+            gp.enqueue(t, false); // Don't auto-play yet
         }
 
-        if (!gp.getCurrent()) {
+        // ==========================
+        // JOIN VOICE CHANNEL IF NOT CONNECTED
+        // ==========================
+        if (!gp.connection) {
+            const channel = (interaction.member as any).voice?.channel;
+            if (!channel) {
+                await interaction.editReply('❌ You need to be in a voice channel!');
+                return;
+            }
+
+            console.log('[play] Joining voice channel:', channel.name);
+            const connection = joinVoiceChannel({
+                channelId: channel.id,
+                guildId: interaction.guildId!,
+                adapterCreator: interaction.guild!.voiceAdapterCreator as any
+            });
+
+            gp.connection = connection;
+            connection.subscribe(gp.player);
+            
+            console.log('[play] Voice connection established');
+        }
+
+        // ==========================
+        // START PLAYBACK
+        // ==========================
+        if (!gp.currentTrack) {
+            console.log('[play] Starting playback...');
             await gp.playNext();
         }
+
+        // REPLY
+        let replyText = `✅ Added **${tracksToEnqueue.length} songs** from Spotify playlist to queue!`;
+        await interaction.editReply(replyText);
 
         gp._playlistTracks = tracks;
         gp._playlistPointer = MAX_TRACKS;
         gp._playlistId = playlistId ?? undefined;
         gp._lastRequester = interaction.user.tag;
 
-        console.log('[Spotify] Final queue:', gp.queue.map(t => ({
+        console.log('[Spotify] Final queue:', gp.queue.map((t: any) => ({
             spotifyIndex: t.spotifyIndex,
             title: t.title
         })));
@@ -313,13 +349,13 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     if (!gp.startedBy) {
         gp.startedBy = interaction.member?.user?.username || interaction.user.username;
     }
-    
+
     if (!gp.ensureVoiceConnection()) {
         return interaction.editReply('Cannot connect to voice channel.');
     }
 
     const trackSource = query.includes('spotify.com') ? 'Spotify' : 'YouTube';
-    
+
     let thumbnail: string | undefined;
     if (trackSource === 'YouTube' && songInfo.url) {
         const videoId = songInfo.url.match(/[?&]v=([^&]+)/)?.[1];
@@ -327,7 +363,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             thumbnail = `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
         }
     }
-    
+
     gp.enqueue({
         url: songInfo.url,
         title: songInfo.title ?? songInfo.url,
@@ -337,7 +373,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     }, false);
 
     const wasPlaying = gp.getCurrent() !== null;
-    
+
     if (!wasPlaying) {
         console.log('[play] Starting playback for single track');
         await gp.playNext();
@@ -391,43 +427,6 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     gp.queueChannelId = sent.channelId;
 };
 
-// YOUTUBE-DL-EXEC - NO COOKIES NEEDED
-export async function streamWithYoutubeDl(url: string) {
-    console.log('[play] Using youtube-dl-exec for:', url);
-    
-    try {
-        const info: any = await youtubedl(url, {
-            dumpSingleJson: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            preferFreeFormats: true,
-            addHeader: ['referer:youtube.com', 'user-agent:googlebot']
-        });
-
-        if (!info || typeof info === 'string') {
-            throw new Error('Invalid response from youtube-dl-exec');
-        }
-
-        const audioFormat = info.formats?.find((f: any) => 
-            f.acodec !== 'none' && f.vcodec === 'none'
-        ) || info.formats?.find((f: any) => f.acodec !== 'none');
-
-        if (!audioFormat || !audioFormat.url) {
-            throw new Error('No audio format found');
-        }
-
-        console.log('[play] Found audio URL from youtube-dl-exec');
-        
-        const response = await fetch(audioFormat.url);
-        if (!response.ok) throw new Error('Failed to fetch audio stream');
-        
-        return { stream: Readable.fromWeb(response.body as any), type: 'arbitrary' as const };
-    } catch (err) {
-        console.error('[play] youtube-dl-exec failed:', err);
-        throw err;
-    }
-}
-
 function extractSpotifyPlaylistId(url: string): string | null {
     try {
         const u = new URL(url);
@@ -452,7 +451,7 @@ export function buildQueueList(tracks: any[]): string {
 // USE YT-DLP WITH PUBLIC PROXY - NO COOKIES NEEDED
 export async function streamWithYtDlp(url: string) {
     console.log('[play] Using yt-dlp binary with proxy for:', url);
-    
+
     return new Promise<{ stream: Readable; type: any }>((resolve, reject) => {
         const ytDlp = spawn('yt-dlp', [
             '-f', 'bestaudio',
@@ -470,9 +469,9 @@ export async function streamWithYtDlp(url: string) {
         ]);
 
         const stream = new PassThrough();
-        
+
         ytDlp.stdout.pipe(stream);
-        
+
         ytDlp.stderr.on('data', (data) => {
             console.log('[yt-dlp]', data.toString());
         });
@@ -500,18 +499,18 @@ export async function streamWithYtDlp(url: string) {
 // USE PIPED API WITH INVIDIOUS FALLBACK - STREAMING PROXY WITHOUT COOKIES
 export async function streamWithPiped(url: string) {
     console.log('[play] Using Piped/Invidious API for:', url);
-    
+
     try {
         const videoId = url.match(/[?&]v=([^&]+)/)?.[1];
         if (!videoId) throw new Error('Invalid YouTube URL');
-        
+
         // Try Piped instances first
         const pipedInstances = [
             'https://pipedapi.kavin.rocks',
             'https://pipedapi.adminforge.de',
             'https://api-piped.mha.fi'
         ];
-        
+
         for (const instance of pipedInstances) {
             try {
                 console.log('[Piped] Trying instance:', instance);
@@ -522,46 +521,46 @@ export async function streamWithPiped(url: string) {
                     },
                     signal: AbortSignal.timeout(10000)
                 });
-                
+
                 if (!response.ok) {
                     console.log('[Piped] Instance failed with status:', response.status);
                     continue;
                 }
-                
+
                 const data = await response.json();
-                const audioStream = data.audioStreams?.find((s: any) => 
+                const audioStream = data.audioStreams?.find((s: any) =>
                     s.quality === 'MEDIUM' || s.quality === 'HIGH'
                 ) || data.audioStreams?.[0];
-                
+
                 if (!audioStream || !audioStream.url) {
                     console.log('[Piped] No audio stream found');
                     continue;
                 }
-                
+
                 console.log('[Piped] Found audio stream:', audioStream.quality);
-                
+
                 const streamResponse = await fetch(audioStream.url, {
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     }
                 });
-                
+
                 if (!streamResponse.ok) {
                     console.log('[Piped] Stream URL failed with status:', streamResponse.status);
                     continue;
                 }
-                
+
                 console.log('[play] Piped stream created successfully');
-                return { 
-                    stream: Readable.fromWeb(streamResponse.body as any), 
-                    type: StreamType.Arbitrary 
+                return {
+                    stream: Readable.fromWeb(streamResponse.body as any),
+                    type: StreamType.Arbitrary
                 };
             } catch (err) {
                 console.log('[Piped] Instance error:', err);
                 continue;
             }
         }
-        
+
         // Fallback to Invidious
         console.log('[play] All Piped instances failed, trying Invidious...');
         const invidiousInstances = [
@@ -569,7 +568,7 @@ export async function streamWithPiped(url: string) {
             'https://invidious.private.coffee',
             'https://yt.artemislena.eu'
         ];
-        
+
         for (const instance of invidiousInstances) {
             try {
                 console.log('[Invidious] Trying instance:', instance);
@@ -580,46 +579,46 @@ export async function streamWithPiped(url: string) {
                     },
                     signal: AbortSignal.timeout(10000)
                 });
-                
+
                 if (!response.ok) {
                     console.log('[Invidious] Instance failed with status:', response.status);
                     continue;
                 }
-                
+
                 const data = await response.json();
-                const audioFormat = data.adaptiveFormats?.find((f: any) => 
+                const audioFormat = data.adaptiveFormats?.find((f: any) =>
                     f.type?.includes('audio')
                 ) || data.formatStreams?.[0];
-                
+
                 if (!audioFormat || !audioFormat.url) {
                     console.log('[Invidious] No audio format found');
                     continue;
                 }
-                
+
                 console.log('[Invidious] Found audio format');
-                
+
                 const streamResponse = await fetch(audioFormat.url, {
                     headers: {
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     }
                 });
-                
+
                 if (!streamResponse.ok) {
                     console.log('[Invidious] Stream URL failed with status:', streamResponse.status);
                     continue;
                 }
-                
+
                 console.log('[play] Invidious stream created successfully');
-                return { 
-                    stream: Readable.fromWeb(streamResponse.body as any), 
-                    type: StreamType.Arbitrary 
+                return {
+                    stream: Readable.fromWeb(streamResponse.body as any),
+                    type: StreamType.Arbitrary
                 };
             } catch (err) {
                 console.log('[Invidious] Instance error:', err);
                 continue;
             }
         }
-        
+
         throw new Error('All Piped and Invidious instances failed');
     } catch (err) {
         console.error('[play] All proxies failed:', err);
@@ -627,24 +626,85 @@ export async function streamWithPiped(url: string) {
     }
 }
 
-// USE PLAY-DL WITH CUSTOM AGENT - NO COOKIES NEEDED
-export async function streamWithPlayDl(url: string) {
-    console.log('[play] Using play-dl with custom agent for:', url);
+export async function streamWithYoutubeDl(url: string) {
+    console.log('[play] Using youtube-dl-exec for:', url);
     
     try {
-        // Set custom options for play-dl
-        playdl.setToken({
-            useragent: ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36']
-        });
+        // Get fresh cookies from CookieManager
+        let cookiesPath: string | undefined;
+        try {
+            const cookieContent = await CookieManager.getCookies();
+            cookiesPath = './youtube-cookies.txt';
+            console.log('[play] Using dynamically fetched cookies');
+        } catch (err) {
+            console.log('[play] Failed to get cookies:', err);
+            console.log('[play] Proceeding without authentication');
+        }
 
-        const stream = await playdl.stream(url, {
-            quality: 2, // High quality
+        // Build yt-dlp options
+        const options: any = {
+            dumpSingleJson: true,
+            noWarnings: true,
+            noCheckCertificates: true,
+            preferFreeFormats: true,
+            addHeader: ['referer:youtube.com', 'user-agent:googlebot']
+        };
+
+        // Add cookies if available
+        if (cookiesPath) {
+            options.cookies = cookiesPath;
+        }
+
+        // Get the best audio URL
+        const output = await youtubedl(url, options);
+
+        const info: any = output;
+        
+        // Find best audio format
+        let audioUrl: string | undefined;
+        
+        if (info.requested_formats) {
+            const audioFormat = info.requested_formats.find((f: any) => f.acodec && f.acodec !== 'none');
+            audioUrl = audioFormat?.url;
+        } else if (info.formats) {
+            const audioFormats = info.formats.filter((f: any) => 
+                f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
+            );
+            
+            if (audioFormats.length > 0) {
+                audioFormats.sort((a: any, b: any) => (b.abr || 0) - (a.abr || 0));
+                audioUrl = audioFormats[0].url;
+            }
+        }
+        
+        if (!audioUrl && info.url) {
+            audioUrl = info.url;
+        }
+        
+        if (!audioUrl) {
+            throw new Error('Could not extract audio URL from video info');
+        }
+
+        console.log('[play] Found audio URL from youtube-dl-exec');
+        
+        const response = await fetch(audioUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
         });
         
-        console.log('[play] play-dl stream created successfully');
-        return { stream: stream.stream, type: stream.type };
+        if (!response.ok) {
+            throw new Error(`Failed to fetch audio stream: ${response.status}`);
+        }
+        
+        console.log('[play] Audio stream response OK');
+        
+        return { 
+            stream: Readable.fromWeb(response.body as any), 
+            type: StreamType.Arbitrary 
+        };
     } catch (err) {
-        console.error('[play] play-dl failed:', err);
+        console.error('[play] youtube-dl-exec failed:', err);
         throw err;
     }
 }

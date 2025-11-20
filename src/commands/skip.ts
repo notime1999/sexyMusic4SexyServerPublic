@@ -13,7 +13,7 @@ export const execute = async (interaction: ChatInputCommandInteraction) => {
     gp.skip();
 
     setTimeout(() => {
-        const nowPlaying = gp.getCurrentTrack();
+        const nowPlaying = gp.getCurrent();
         if (nowPlaying) {
             interaction.reply(`Skipped. Now playing: ${nowPlaying.title}`);
         } else {

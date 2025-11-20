@@ -23,43 +23,40 @@ export interface Track {
 }
 
 export default class GuildPlayer {
-    private static players = new Map<string, GuildPlayer>();
+    private static instances: Map<string, GuildPlayer> = new Map();
+    
+    guildId: string;
+    voiceChannel: VoiceBasedChannel;
+    connection: VoiceConnection | null = null;
+    player: AudioPlayer;
+    queue: any[] = [];
+    currentTrack: any = null;
+    queueMessageId: string | null = null;
+    queueChannelId: string | null = null;
+    startedBy: string = '';
+    lastAction: string = '';
+    _playlistTracks?: any[];
+    _playlistPointer?: number;
+    _playlistId?: string;
+    _lastRequester?: string;
+    private disconnectTimer?: NodeJS.Timeout;
+    private stopped = false;
 
-    public queue: Track[] = [];
-    private connection: VoiceConnection | null = null;
-    private player: AudioPlayer | null = null;
-    private guildId: string;
-    private playing = false;
-    private currentTrack: Track | null = null;
-    private voiceChannel: VoiceBasedChannel | null = null;
-
-    public getCurrentTrack() {
-        return this.currentTrack;
-    }
-
-    public _playlistTracks?: any[];
-    public _playlistPointer?: number;
-    public _playlistId?: string;
-    public _lastRequester?: string;
-    public startedBy?: string;
-    public lastAction?: string;
-
-    private inactivityTimer: NodeJS.Timeout | null = null;
-    private static readonly INACTIVITY_TIMEOUT = 5 * 60 * 1000;
-
-    private constructor(guildId: string) {
+    private constructor(guildId: string, voiceChannel: VoiceBasedChannel) {
         this.guildId = guildId;
+        this.voiceChannel = voiceChannel;
+        this.player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
     }
 
     static get(guildId: string) {
-        return this.players.get(guildId) ?? null;
+        return this.instances.get(guildId) ?? null;
     }
 
     static create(guildId: string, voiceChannel: VoiceBasedChannel) {
-        let gp = this.players.get(guildId);
+        let gp = this.instances.get(guildId);
         if (!gp) {
-            gp = new GuildPlayer(guildId);
-            this.players.set(guildId, gp);
+            gp = new GuildPlayer(guildId, voiceChannel);
+            this.instances.set(guildId, gp);
         }
         gp.voiceChannel = voiceChannel;
         gp.stopped = false;
@@ -92,79 +89,104 @@ export default class GuildPlayer {
             console.warn('[GuildPlayer] Tried to enqueue a track without url, skipping:', track);
             return;
         }
+        
+        // CHECK FOR DUPLICATES
+        const isDuplicate = this.queue.some(t => 
+            t.url === track.url || 
+            (t.title && track.title && t.title.toLowerCase() === track.title.toLowerCase())
+        );
+        
+        if (isDuplicate) {
+            console.log('[GuildPlayer] Skipping duplicate:', track.title);
+            return;
+        }
+        
         this.queue.push(track);
-        console.log('[DEBUG] enqueue:', this.queue.length, this.queue.map(t => t.title));
+        console.log(`[GuildPlayer] Added to queue [${this.queue.length}]: ${track.title}`);
+        
         // if nothing playing, start
-        if (autoPlay && !this.playing) {
+        if (autoPlay && !this.currentTrack) {
             this.playNext().catch((e) => console.error('[GuildPlayer] playNext error', e));
         }
     }
 
-    private resetInactivityTimer() {
-        if (this.inactivityTimer) clearTimeout(this.inactivityTimer);
-        if (this.connection) {
-            this.inactivityTimer = setTimeout(() => {
-                this.connection?.destroy();
-                this.connection = null;
-                this.player = null;
-                this.playing = false;
-                this.currentTrack = null;
-                console.log(`[GuildPlayer] guild=${this.guildId} Disconnected due to inactivity`);
-            }, GuildPlayer.INACTIVITY_TIMEOUT);
-        }
-    }
-
-    private clearInactivityTimer() {
-        if (this.inactivityTimer) {
-            clearTimeout(this.inactivityTimer);
-            this.inactivityTimer = null;
-        }
-    }
-
-    private stopped = false;
-
     async stop() {
-        this.stopped = true;
-        try {
-            if (this.player) {
-                this.player.stop(true);
-            }
-            if (this.connection) {
-                this.connection.destroy();
-                this.connection = null;
-            }
-        } catch { }
+        console.log('[GuildPlayer] Stopping playback');
+        
+        // Clear disconnect timer
+        if (this.disconnectTimer) {
+            clearTimeout(this.disconnectTimer);
+            this.disconnectTimer = undefined;
+        }
+        
         this.queue = [];
-        this._playlistPointer = 0;
-        this._playlistTracks = [];
-        this.lastAction = undefined;
-        this.playing = false;
         this.currentTrack = null;
-        this.clearInactivityTimer();
+        this.player.stop();
+        
+        if (this.connection) {
+            this.connection.destroy();
+            this.connection = null;
+        }
+        
+        GuildPlayer.instances.delete(this.guildId);
     }
 
     async playNext() {
-        if (!this.ensureVoiceConnection()) {
-            console.error('[GuildPlayer] Cannot play: not connected to voice channel');
-            return;
-        }
-
-        if (!this.player) {
-            console.error('[GuildPlayer] Player is not initialized');
-            return;
-        }
-
         if (this.queue.length === 0) {
             console.log('[GuildPlayer] Queue is empty');
-            this.currentTrack = null;
-            this.setPlaying(false);
+            
+            // DISCONNECT FROM VOICE CHANNEL AFTER 30 SECONDS OF INACTIVITY
+            if (this.disconnectTimer) {
+                clearTimeout(this.disconnectTimer);
+            }
+            
+            this.disconnectTimer = setTimeout(() => {
+                console.log('[GuildPlayer] No songs in queue for 30s, disconnecting...');
+                if (this.connection) {
+                    this.connection.destroy();
+                    this.connection = null;
+                }
+                GuildPlayer.instances.delete(this.guildId);
+            }, 30000);
+            
+            return;
+        }
+        
+        // Clear disconnect timer if new song is played
+        if (this.disconnectTimer) {
+            clearTimeout(this.disconnectTimer);
+            this.disconnectTimer = undefined;
+        }
+
+        // ENSURE CONNECTION AND SUBSCRIPTION BEFORE PLAYING
+        if (!this.connection || 
+            this.connection.state.status === VoiceConnectionStatus.Disconnected ||
+            this.connection.state.status === VoiceConnectionStatus.Destroyed) {
+            
+            console.log('[GuildPlayer] Reconnecting to voice channel...');
+            this.connection = joinVoiceChannel({
+                channelId: this.voiceChannel.id,
+                guildId: this.voiceChannel.guild.id,
+                adapterCreator: this.voiceChannel.guild.voiceAdapterCreator as any,
+            });
+        }
+
+        // ENSURE SUBSCRIPTION
+        if (this.connection && this.player) {
+            this.connection.subscribe(this.player);
+            console.log('[GuildPlayer] Connection subscribed to player');
+        }
+
+        const track = this.queue.shift();
+        if (!track) {
+            console.log('[GuildPlayer] Track ended, playing next...');
+            await this.playNext();
             return;
         }
 
-        const track = this.queue.shift()!;
         this.currentTrack = track;
-        console.log('[GuildPlayer] guild=' + this.guildId + ' playing next:', track.title);
-        console.log('[GuildPlayer] Track URL:', track.url); // DEBUG LOG
+        console.log('[GuildPlayer] Now playing:', track.title);
+        console.log('[GuildPlayer] Track URL:', track.url);
 
         // VALIDATE URL
         if (!track.url || track.url === 'undefined' || track.url.startsWith('spotify:')) {
@@ -207,44 +229,95 @@ export default class GuildPlayer {
             return;
         }
 
-        try {
-            // Use youtube-dl-exec - MOST RELIABLE
-            console.log('[GuildPlayer] Calling streamWithYoutubeDl with URL:', track.url);
-            const { streamWithYoutubeDl } = await import('../commands/play');
-            const streamResult = await streamWithYoutubeDl(track.url);
-            
-            if (!streamResult.stream) {
-                throw new Error('Stream is null or undefined');
+        // RETRY LOGIC FOR STREAMING
+        let retries = 3;
+        let lastError: any = null;
+
+        while (retries > 0) {
+            try {
+                console.log('[GuildPlayer] Calling streamWithYoutubeDl with URL:', track.url, `(attempt ${4 - retries}/3)`);
+                const { streamWithYoutubeDl } = await import('../commands/play');
+                const streamResult = await streamWithYoutubeDl(track.url);
+                
+                if (!streamResult.stream) {
+                    throw new Error('Stream is null or undefined');
+                }
+                
+                resource = createAudioResource(streamResult.stream, {
+                    inputType: StreamType.Arbitrary,
+                    inlineVolume: true
+                });
+                
+                if (resource.volume) {
+                    resource.volume.setVolume(0.5);
+                }
+                
+                // Add error handlers with retry
+                let streamErrorHandled = false;
+                
+                streamResult.stream.on('error', (err) => {
+                    if (!streamErrorHandled) {
+                        streamErrorHandled = true;
+                        console.error('[GuildPlayer] Stream error:', err.message);
+                        // Don't retry on stream errors, just skip to next
+                        this.player.stop();
+                    }
+                });
+                
+                streamResult.stream.on('end', () => {
+                    console.log('[GuildPlayer] Stream ended naturally');
+                });
+                
+                streamResult.stream.on('close', () => {
+                    console.log('[GuildPlayer] Stream closed');
+                });
+                
+                console.log('[GuildPlayer] Created audio resource from youtube-dl-exec');
+                break; // Success, exit retry loop
+                
+            } catch (err: any) {
+                lastError = err;
+                retries--;
+                console.error(`[GuildPlayer] Attempt ${4 - retries - 1} failed:`, err.message);
+                
+                if (retries > 0) {
+                    console.log(`[GuildPlayer] Retrying in 2 seconds... (${retries} attempts left)`);
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                } else {
+                    console.error('[GuildPlayer] All retry attempts failed, skipping track');
+                    await this.playNext();
+                    return;
+                }
             }
-            
-            resource = createAudioResource(streamResult.stream, {
-                inputType: StreamType.Arbitrary,
-                inlineVolume: true
-            });
-            
-            if (resource.volume) {
-                resource.volume.setVolume(0.5);
-            }
-            
-            console.log('[GuildPlayer] Created audio resource from youtube-dl-exec');
-        } catch (err) {
-            console.error('[GuildPlayer] youtube-dl-exec failed:', err);
-            await this.playNext();
-            return;
         }
 
         if (!resource) {
-            console.error('[GuildPlayer] Failed to create audio resource');
+            console.error('[GuildPlayer] Failed to create resource after retries');
             await this.playNext();
             return;
         }
 
-        this.player.play(resource);
-        this.setPlaying(true);
+        // FINAL CHECK: Ensure connection is ready
+        if (this.connection.state.status !== VoiceConnectionStatus.Ready) {
+            console.log('[GuildPlayer] Waiting for connection to be ready...');
+            try {
+                await entersState(this.connection, VoiceConnectionStatus.Ready, 10_000);
+                console.log('[GuildPlayer] Connection is now ready');
+            } catch (err) {
+                console.error('[GuildPlayer] Connection failed to become ready:', err);
+                await this.playNext();
+                return;
+            }
+        }
 
-        this.player.once(AudioPlayerStatus.Idle, async () => {
-            console.log('[GuildPlayer] Track ended, playing next...');
-            await this.playNext();
+        this.player.play(resource);
+        console.log('[GuildPlayer] ▶️ Started playing:', track.title);
+        
+        // Player error handler
+        this.player.once('error', (error) => {
+            console.error('[GuildPlayer] Player error:', error.message);
+            // Skip to next track on player error
+            this.player.stop();
         });
     }
 
@@ -267,10 +340,6 @@ export default class GuildPlayer {
         return this.currentTrack;
     }
 
-    public setPlaying(value: boolean) {
-        this.playing = value;
-    }
-
     async shuffleQueue(forceSimple = false) {
         if (!this.ensureVoiceConnection()) {
             console.error('[GuildPlayer] Cannot shuffle: not connected to voice channel');
@@ -285,9 +354,6 @@ export default class GuildPlayer {
                 [this._playlistTracks[i], this._playlistTracks[j]] = [this._playlistTracks[j], this._playlistTracks[i]];
             }
 
-            console.log('[GuildPlayer] Playlist shuffled. First 3 tracks:',
-                this._playlistTracks.slice(0, 3).map(t => `${t.name} - ${t.artists.join(', ')}`));
-
             this.queue = [];
             this._playlistPointer = 0;
 
@@ -296,8 +362,6 @@ export default class GuildPlayer {
 
             for (let i = 0; i < this._playlistTracks.length && tracksToEnqueue.length < MAX_TRACKS; i++) {
                 const t = this._playlistTracks[i];
-                console.log(`[GuildPlayer] Adding track ${tracksToEnqueue.length + 1}/${MAX_TRACKS}: ${t.name} - ${t.artists.join(', ')}`);
-
                 tracksToEnqueue.push({
                     url: t.url || `spotify:track:${t.id}`,
                     title: `${t.name} - ${t.artists.join(', ')}`,
@@ -331,9 +395,6 @@ export default class GuildPlayer {
         }
     }
 
-    public queueMessageId?: string;
-    public queueChannelId?: string;
-
     public async deleteQueueMessage(client: Client) {
         if (this.queueMessageId && this.queueChannelId) {
             try {
@@ -343,8 +404,8 @@ export default class GuildPlayer {
                     await msg.delete();
                 }
             } catch { }
-            this.queueMessageId = undefined;
-            this.queueChannelId = undefined;
+            this.queueMessageId = null;
+            this.queueChannelId = null;
         }
     }
 
@@ -402,13 +463,4 @@ export default class GuildPlayer {
 
         return true;
     }
-}
-
-function shuffleArray<T>(array: T[]): T[] {
-    const arr = array.slice();
-    for (let i = arr.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [arr[i], arr[j]] = [arr[j], arr[i]];
-    }
-    return arr;
 }
