@@ -42,9 +42,10 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     const ytPlaylistMatch = query.match(/[?&]list=([A-Za-z0-9_-]+)/);
     const playlistId = ytPlaylistMatch ? ytPlaylistMatch[1] : null;
     const isYouTubePlaylist = query.includes('youtube.com/playlist') || (query.includes('youtube.com/watch') && query.includes('&list='));
-    const isSpotifyPlaylist = query.includes('open.spotify.com/playlist');
+    const isSpotifyPlaylist = query.includes('open.spotify.com') && query.includes('/playlist');
+    const isSpotifyArtist = query.includes('open.spotify.com') && query.includes('/artist'); // FIX THIS
 
-    console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist);
+    console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist, 'isSpotifyArtist=', isSpotifyArtist);
 
     // Check if user is in voice channel AFTER defer
     const member = interaction.member as GuildMember;
@@ -155,6 +156,150 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
             console.error('[play] Failed to fetch YouTube playlist:', error);
             return interaction.editReply('❌ Failed to fetch YouTube playlist. Please try again.');
         }
+        return;
+    }
+
+    if (isSpotifyArtist) {
+        const voiceChannel = member.voice.channel;
+        const gp = GuildPlayer.get(voiceChannel.guild.id) || GuildPlayer.create(voiceChannel.guild.id, voiceChannel);
+
+        if (!gp.startedBy) {
+            gp.startedBy = interaction.member?.user?.username || interaction.user.username;
+        }
+
+        if (!gp.ensureVoiceConnection()) {
+            return interaction.editReply('Cannot connect to voice channel.');
+        }
+
+        // Extract artist ID from URL
+        const artistId = extractSpotifyArtistId(query);
+        if (!artistId) {
+            return interaction.editReply('❌ Invalid Spotify artist URL.');
+        }
+
+        let tracks: any[] = [];
+        try {
+            await ensureSpotifyToken();
+            
+            // Get artist's top tracks
+            const topTracksResponse = await spotifyApi.getArtistTopTracks(artistId, 'US');
+            const topTracks = topTracksResponse.body.tracks;
+            
+            if (!topTracks || topTracks.length === 0) {
+                return interaction.editReply('❌ No tracks found for this artist.');
+            }
+
+            // Convert to our track format
+            tracks = topTracks.map((track: any) => ({
+                id: track.id,
+                name: track.name,
+                artists: track.artists.map((a: any) => a.name),
+                album: {
+                    images: track.album.images
+                },
+                url: track.external_urls?.spotify
+            }));
+
+            console.log('[Spotify Artist] Found', tracks.length, 'top tracks');
+        } catch (err) {
+            console.error('[Spotify Artist] Error fetching top tracks:', err);
+            return interaction.editReply('❌ Error retrieving artist top tracks.');
+        }
+
+        const MAX_TRACKS = 10;
+        const tracksToEnqueue: any[] = [];
+
+        for (let i = 0; i < tracks.length && tracksToEnqueue.length < MAX_TRACKS; i++) {
+            const t = tracks[i];
+            console.log(`[Spotify Artist] Adding track ${tracksToEnqueue.length + 1}/${MAX_TRACKS}: ${t.name} - ${t.artists.join(', ')}`);
+
+            tracksToEnqueue.push({
+                url: t.url || `spotify:track:${t.id}`,
+                title: `${t.name} - ${t.artists.join(', ')}`,
+                spotifyIndex: i,
+                spotifyName: t.name,
+                spotifyArtists: t.artists,
+                spotifyId: t.id,
+                requestedBy: interaction.user.tag,
+                source: 'Spotify',
+                thumbnail: t.album?.images?.[0]?.url
+            });
+        }
+
+        if (tracksToEnqueue.length === 0) {
+            return interaction.editReply('❌ No valid tracks found for this artist.');
+        }
+
+        // Enqueue tracks
+        console.log(`[play] Enqueuing ${tracksToEnqueue.length} artist tracks`);
+        for (const t of tracksToEnqueue) {
+            gp.enqueue(t, false);
+        }
+
+        // Join voice channel if not connected
+        if (!gp.connection) {
+            const channel = (interaction.member as any).voice?.channel;
+            if (!channel) {
+                await interaction.editReply('❌ You need to be in a voice channel!');
+                return;
+            }
+
+            console.log('[play] Joining voice channel:', channel.name);
+            const connection = joinVoiceChannel({
+                channelId: channel.id,
+                guildId: interaction.guildId!,
+                adapterCreator: interaction.guild!.voiceAdapterCreator as any
+            });
+
+            gp.connection = connection;
+            connection.subscribe(gp.player);
+            
+            console.log('[play] Voice connection established');
+        }
+
+        // Start playback
+        if (!gp.currentTrack) {
+            console.log('[play] Starting playback...');
+            await gp.playNext();
+        }
+
+        await interaction.editReply(`✅ Added **${tracksToEnqueue.length} top tracks** from artist to queue!`);
+        replyUpdated = true;
+
+        // Build embed
+        await gp.deleteQueueMessage(interaction.client);
+
+        const nowPlaying = gp.getCurrent();
+        const maxQueueToShow = 10;
+        const more = gp.queue.length > maxQueueToShow ? `\n...and ${gp.queue.length - maxQueueToShow} more` : '';
+        let queueStr = buildQueueList(gp.queue.slice(0, maxQueueToShow)) + more;
+        if (!queueStr.trim()) queueStr = 'No tracks in queue.';
+        if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
+
+        const requester = interaction.member?.user?.username || interaction.user.username;
+
+        const embed = new EmbedBuilder()
+            .setTitle('Music Queue')
+            .addFields(
+                { name: 'Now playing', value: nowPlaying?.title ?? 'Nothing' },
+                { name: 'Queue', value: queueStr },
+                { name: 'Requested by', value: requester, inline: true }
+            );
+
+        if (nowPlaying?.thumbnail) {
+            embed.setThumbnail(nowPlaying.thumbnail);
+        }
+
+        const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+            new ButtonBuilder().setCustomId('shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Primary),
+            new ButtonBuilder().setCustomId('skip').setLabel('Skip').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
+        );
+
+        await interaction.editReply({ embeds: [embed], components: [row] });
+        const sent = await interaction.fetchReply();
+        gp.queueMessageId = sent.id;
+        gp.queueChannelId = sent.channelId;
         return;
     }
 
@@ -407,14 +552,35 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     gp.queueChannelId = sent.channelId;
 };
 
+function extractSpotifyArtistId(url: string): string | null {
+    try {
+        // Remove language/region prefix like /intl-it/
+        url = url.replace(/\/intl-[a-z]{2}\//, '/');
+        
+        const u = new URL(url);
+        const parts = u.pathname.split('/').filter(Boolean);
+        const idx = parts.findIndex(p => p === 'artist');
+        if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
+    } catch (e) {
+        // Fallback regex that handles intl URLs
+        const m = url.match(/\/artist\/([A-Za-z0-9_-]+)/);
+        if (m && m[1]) return m[1];
+    }
+    return null;
+}
+
 function extractSpotifyPlaylistId(url: string): string | null {
     try {
+        // Remove language/region prefix like /intl-it/
+        url = url.replace(/\/intl-[a-z]{2}\//, '/');
+        
         const u = new URL(url);
         const parts = u.pathname.split('/').filter(Boolean);
         const idx = parts.findIndex(p => p === 'playlist');
         if (idx >= 0 && parts[idx + 1]) return parts[idx + 1];
     } catch (e) {
-        const m = url.match(/playlist\/([A-Za-z0-9_-]+)/);
+        // Fallback regex that handles intl URLs
+        const m = url.match(/\/playlist\/([A-Za-z0-9_-]+)/);
         if (m && m[1]) return m[1];
     }
     return null;
