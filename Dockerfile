@@ -44,7 +44,16 @@ COPY package.json package-lock.json* ./
 RUN npm install
 
 COPY . .
+COPY .env .env
 
 RUN npm run build
+
+# Environment variables will be passed at runtime
+ENV DISCORD_TOKEN=""
+ENV SPOTIFY_CLIENT_ID=""
+ENV SPOTIFY_CLIENT_SECRET=""
+ENV YOUTUBE_API_KEY=""
+ENV DISCORD_CLIENT_ID=""
+ENV DISCORD_GUILD_ID=""
 
 CMD ["npm", "start"]

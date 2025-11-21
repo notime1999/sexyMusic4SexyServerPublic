@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  discord-bot:
+    build: .
+    container_name: sexy-music-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./youtube-cookies.txt:/app/youtube-cookies.txt
+    networks:
+      - bot-network
+
+networks:
+  bot-network:
+    driver: bridge
