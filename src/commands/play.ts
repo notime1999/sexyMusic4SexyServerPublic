@@ -24,6 +24,8 @@ import { spawn } from 'child_process';
 import { Readable, PassThrough } from 'stream';
 import fs from 'fs/promises';
 import { CookieManager } from '../services/cookieManager';
+import YTDlpWrap from 'yt-dlp-wrap';
+
 
 const streamManager = new StreamManager();
 
@@ -180,11 +182,11 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
         let tracks: any[] = [];
         try {
             await ensureSpotifyToken();
-            
+
             // Get artist's top tracks
             const topTracksResponse = await spotifyApi.getArtistTopTracks(artistId, 'US');
             const topTracks = topTracksResponse.body.tracks;
-            
+
             if (!topTracks || topTracks.length === 0) {
                 return interaction.editReply('❌ No tracks found for this artist.');
             }
@@ -253,7 +255,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
             gp.connection = connection;
             connection.subscribe(gp.player);
-            
+
             console.log('[play] Voice connection established');
         }
 
@@ -380,7 +382,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
 
             gp.connection = connection;
             connection.subscribe(gp.player);
-            
+
             console.log('[play] Voice connection established');
         }
 
@@ -556,7 +558,7 @@ function extractSpotifyArtistId(url: string): string | null {
     try {
         // Remove language/region prefix like /intl-it/
         url = url.replace(/\/intl-[a-z]{2}\//, '/');
-        
+
         const u = new URL(url);
         const parts = u.pathname.split('/').filter(Boolean);
         const idx = parts.findIndex(p => p === 'artist');
@@ -573,7 +575,7 @@ function extractSpotifyPlaylistId(url: string): string | null {
     try {
         // Remove language/region prefix like /intl-it/
         url = url.replace(/\/intl-[a-z]{2}\//, '/');
-        
+
         const u = new URL(url);
         const parts = u.pathname.split('/').filter(Boolean);
         const idx = parts.findIndex(p => p === 'playlist');
@@ -772,10 +774,48 @@ export async function streamWithPiped(url: string) {
     }
 }
 
+export async function streamWithWrapper(videoUrl: string): Promise<{ stream: Readable; title: string }> {
+    try {
+        console.log('[play] Using yt-dlp wrapper for:', videoUrl);
+
+        // Costruisci il percorso corretto per yt-dlp.exe nella root del progetto
+        const ytDlpPath = path.join(__dirname, '..', '..', 'yt-dlp.exe');
+        console.log('[play] Using yt-dlp path:', ytDlpPath);
+        const ytDlpWrap = new YTDlpWrap(ytDlpPath);
+
+        // Prima ottieni il titolo del video
+        console.log('[play] Getting video info...');
+        const infoStdout = await ytDlpWrap.execPromise([
+            videoUrl,
+            '--get-title',
+            '--no-warnings'
+        ]);
+        const title = infoStdout.trim();
+        console.log('[play] Video title:', title);
+
+        // Poi crea lo stream audio
+        console.log('[play] Creating audio stream...');
+        const audioStream = ytDlpWrap.execStream([
+            videoUrl,
+            '-f', 'bestaudio',
+            '-o', '-',
+            '--no-warnings'
+        ]);
+
+        console.log('[play] Stream created successfully');
+        return { stream: audioStream, title };
+
+    } catch (err) {
+        console.error('[play] yt-dlp-wrap failed:', err);
+        throw new Error(`Failed to get YouTube stream via yt-dlp-wrap`);
+    }
+}
+
+
 export async function streamWithYoutubeDl(videoUrl: string, retryWithFreshCookies = true): Promise<{ stream: Readable; title: string }> {
     try {
         console.log('[play] Using youtube-dl-exec for:', videoUrl);
-        
+
         let cookiesString = await CookieManager.getCookies();
         const cookiesFile = './temp-cookies.txt';
         await fs.writeFile(cookiesFile, cookiesString, 'utf-8');
@@ -792,57 +832,57 @@ export async function streamWithYoutubeDl(videoUrl: string, retryWithFreshCookie
 
         // Find best audio format
         let audioUrl: string | undefined;
-        
+
         if (info.requested_formats) {
             const audioFormat = info.requested_formats.find((f: any) => f.acodec && f.acodec !== 'none');
             audioUrl = audioFormat?.url;
         } else if (info.formats) {
-            const audioFormats = info.formats.filter((f: any) => 
+            const audioFormats = info.formats.filter((f: any) =>
                 f.acodec && f.acodec !== 'none' && (!f.vcodec || f.vcodec === 'none')
             );
-            
+
             if (audioFormats.length > 0) {
                 audioFormats.sort((a: any, b: any) => (b.abr || 0) - (a.abr || 0));
                 audioUrl = audioFormats[0].url;
             }
         }
-        
+
         if (!audioUrl && info.url) {
             audioUrl = info.url;
         }
-        
+
         if (!audioUrl) {
             throw new Error('Could not extract audio URL from video info');
         }
 
         console.log('[play] Found audio URL from youtube-dl-exec');
-        
+
         const response = await fetch(audioUrl, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
-        
+
         if (!response.ok) {
             throw new Error(`Failed to fetch audio stream: ${response.status}`);
         }
-        
+
         console.log('[play] Audio stream response OK');
-        
-        return { 
+
+        return {
             stream: Readable.fromWeb(response.body as any),
             title: info.title || 'Unknown Title'
         };
     } catch (err: any) {
         console.error('[play] youtube-dl-exec failed:', err);
-        
+
         // RETRY WITH FRESH COOKIES IF FIRST ATTEMPT FAILS
         if (retryWithFreshCookies && err?.message?.includes('Sign in to confirm')) {
             console.log('[play] Cookie expired, fetching fresh ones and retrying...');
             CookieManager.clearCache(); // Force refresh
             return streamWithYoutubeDl(videoUrl, false); // Retry once
         }
-        
+
         throw new Error(`Failed to get YouTube stream: ${err?.message || 'Unknown error'}`);
     }
 }

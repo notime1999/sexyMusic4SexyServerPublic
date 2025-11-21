@@ -8,7 +8,9 @@
     "build": "tsc",
     "dev": "ts-node-dev --respawn --transpile-only src/bot.ts",
     "prod": "npm run build && npm run start",
-    "start": "node dist/bot.js"
+    "start": "node dist/bot.js",
+    "test": "jest --verbose",
+    "test:watch": "jest --watch --verbose"
   },
   "dependencies": {
     "@discordjs/opus": "^0.10.0",
@@ -25,11 +27,15 @@
     "spotify-web-api-node": "^5.0.0",
     "youtube-dl-exec": "^3.0.26",
     "yt-dlp-exec": "^1.0.2",
+    "yt-dlp-wrap": "^2.3.12",
     "yt-search": "^2.13.1",
     "ytpl": "^2.3.0"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.14",
     "@types/node": "^24.10.1",
+    "jest": "^30.2.0",
+    "ts-jest": "^29.4.5",
     "ts-node": "^10.9.1",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.1.6"
