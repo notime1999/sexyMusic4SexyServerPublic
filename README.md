@@ -5,18 +5,25 @@ A powerful Discord music bot that supports both YouTube and Spotify playback wit
 ## Features
 
 - 🎵 **YouTube Support**: Play songs, playlists, and search results from YouTube
-- 🎧 **Spotify Integration**: Play tracks and playlists from Spotify (searches on YouTube for playback)
+- 🎧 **Spotify Integration**: Play tracks, playlists, and **artist top tracks** from Spotify (searches on YouTube for playback)
+- 👤 **Spotify Artist Support**: Play top 10 tracks from any Spotify artist profile
 - 📋 **Queue Management**: Add multiple tracks, view queue, and manage playback
 - 🔀 **Shuffle**: Randomize your playlist with smart loading
 - ⏭️ **Skip & Stop**: Full playback controls with interactive buttons
 - 🖼️ **Thumbnails**: Display album/video artwork in queue messages
 - 🎮 **Interactive Buttons**: Shuffle, Skip, and Stop buttons on queue messages
-- 🚀 **yt-dlp Integration**: Uses yt-dlp binary for reliable streaming (no cookies needed!)
+- 🚀 **yt-dlp Integration**: Uses yt-dlp binary for reliable streaming with dynamic cookie management
 - ☁️ **Railway Ready**: Fully configured for Railway deployment
 
 ## Commands
 
-- `/play <query>` - Play a song or playlist from YouTube/Spotify
+- `/play <query>` - Play a song, playlist, or artist from YouTube/Spotify
+  - YouTube video: `/play https://www.youtube.com/watch?v=...`
+  - YouTube playlist: `/play https://www.youtube.com/playlist?list=...`
+  - Spotify track: `/play https://open.spotify.com/track/...`
+  - Spotify playlist: `/play https://open.spotify.com/playlist/...`
+  - **Spotify artist**: `/play https://open.spotify.com/artist/...` (plays top 10 tracks)
+  - Search: `/play metallica enter sandman`
 - `/skip` - Skip the current track
 - `/stop` - Stop playback and clear queue
 - `/queue` - Display the current queue with interactive buttons
@@ -127,17 +134,20 @@ docker run -d \
 ## How It Works
 
 ### Spotify Playback
-1. When you play a Spotify playlist, the bot loads the first 10 tracks
-2. It searches for each track on YouTube for actual playback
-3. When shuffling, it loads more tracks dynamically from the Spotify playlist
-4. Thumbnails are fetched from Spotify albums
+1. **Playlists**: When you play a Spotify playlist, the bot loads the first 10 tracks
+2. **Artists**: When you play a Spotify artist, the bot loads their top 10 tracks
+3. It searches for each track on YouTube for actual playback
+4. When shuffling, it loads more tracks dynamically from the Spotify playlist
+5. Thumbnails are fetched from Spotify albums
+6. Supports international Spotify URLs (e.g., `/intl-it/artist/...`)
 
 ### YouTube Playback via yt-dlp
 1. The bot uses **yt-dlp binary** to extract YouTube audio streams
-2. **No cookies or authentication required** - works on any server
+2. **Dynamic cookie management** - automatically fetches fresh YouTube cookies using Puppeteer when needed
 3. Uses `youtube-dl-exec` npm package for Node.js integration
 4. Automatically handles YouTube's bot detection and rate limiting
 5. Supports playlists up to 50 videos (configurable)
+6. Cookie cache with automatic refresh on expiry
 
 ### YouTube Search
 - Primary: Uses `yt-search` npm package (no API key needed)
@@ -195,8 +205,10 @@ docker run -d \
 - **Discord.js v14** - Discord API wrapper
 - **@discordjs/voice** - Voice connection handling
 - **youtube-dl-exec** - Node.js wrapper for yt-dlp binary
-- **yt-dlp** - YouTube video/audio downloader (no cookies needed!)
-- **spotify-web-api-node** - Spotify API integration
+- **yt-dlp** - YouTube video/audio downloader with cookie support
+- **puppeteer-extra** - Dynamic YouTube cookie extraction
+- **puppeteer-extra-plugin-stealth** - Bypass bot detection
+- **spotify-web-api-node** - Spotify API integration (tracks, playlists, and artists)
 - **yt-search** - YouTube search without API key
 - **TypeScript** - Type-safe development
 - **Docker** - Containerized deployment
