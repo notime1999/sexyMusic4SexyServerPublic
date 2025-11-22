@@ -252,24 +252,21 @@ export default class GuildPlayer {
                     resource.volume.setVolume(0.5);
                 }
                 
-                // Add error handlers with retry
-                let streamErrorHandled = false;
-                
-                streamResult.stream.on('error', (err) => {
-                    if (!streamErrorHandled) {
-                        streamErrorHandled = true;
-                        console.error('[GuildPlayer] Stream error:', err.message);
-                        // Don't retry on stream errors, just skip to next
-                        this.player.stop();
+                // Add error handlers
+                streamResult.stream.on('error', (err: any) => {
+                    // Ignore "Premature close" errors - these happen during skip and are normal
+                    if (err.message?.includes('Premature close')) {
+                        return;
                     }
+                    console.error('[GuildPlayer] Stream error:', err.message);
                 });
                 
                 streamResult.stream.on('end', () => {
-                    console.log('[GuildPlayer] Stream ended naturally');
+                    // Stream ended naturally
                 });
                 
                 streamResult.stream.on('close', () => {
-                    console.log('[GuildPlayer] Stream closed');
+                    // Stream closed
                 });
                 
                 console.log('[GuildPlayer] Created audio resource from youtube-dl-exec');
