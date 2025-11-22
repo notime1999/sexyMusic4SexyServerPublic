@@ -74,14 +74,33 @@ export default class GuildPlayer {
         }
         if (!this.player) {
             this.player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
-            this.connection!.subscribe(this.player);
-            this.player.on('stateChange', (_oldS, newS) => {
-            });
-            this.player.on(AudioPlayerStatus.Idle, () => {
-                this.playNext().catch(() => { });
-            });
-            this.player.on('error', (e) => console.error('[GuildPlayer] player error', e));
+            this.setupPlayerListeners();
         }
+        if (this.connection) {
+            this.connection.subscribe(this.player);
+        }
+    }
+
+    private setupPlayerListeners() {
+        // Remove all existing listeners to prevent duplicates
+        this.player.removeAllListeners();
+        
+        this.player.on('stateChange', (_oldS, newS) => {
+            console.log('[GuildPlayer] Player state:', newS.status);
+        });
+        
+        this.player.on(AudioPlayerStatus.Idle, () => {
+            console.log('[GuildPlayer] Player is idle, playing next track...');
+            this.playNext().catch((err) => {
+                console.error('[GuildPlayer] playNext failed:', err);
+            });
+        });
+        
+        this.player.on('error', (e) => {
+            console.error('[GuildPlayer] Player error:', e.message);
+            // Try to play next track on error
+            this.playNext().catch(() => {});
+        });
     }
 
     enqueue(track: Track, autoPlay = true) {
@@ -309,13 +328,6 @@ export default class GuildPlayer {
 
         this.player.play(resource);
         console.log('[GuildPlayer] ▶️ Started playing:', track.title);
-        
-        // Player error handler
-        this.player.once('error', (error) => {
-            console.error('[GuildPlayer] Player error:', error.message);
-            // Skip to next track on player error
-            this.player.stop();
-        });
     }
 
     skip(): Track | null | false {
