@@ -1,6 +1,6 @@
 import { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayer, AudioPlayerStatus, NoSubscriberBehavior, entersState, VoiceConnection, VoiceConnectionStatus, createAudioResource as createRes, StreamType, AudioResource } from '@discordjs/voice';
 import playdl from 'play-dl';
-import { VoiceBasedChannel, Client } from 'discord.js';
+import { VoiceBasedChannel, Client, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import { getPlaylistTrackAt } from '../services/spotify';
 import { searchYouTube as searchSpotifyYT } from '../services/spotify';
 import { searchYouTube as searchYouTubeService } from '../services/youtube';
@@ -46,6 +46,9 @@ export default class GuildPlayer {
         this.guildId = guildId;
         this.voiceChannel = voiceChannel;
         this.player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
+        
+        // Setup player listeners ONCE in constructor - never remove them
+        this.setupPlayerListeners();
     }
 
     static get(guildId: string) {
@@ -66,41 +69,37 @@ export default class GuildPlayer {
 
     private attachIfNeeded(voiceChannel: VoiceBasedChannel) {
         if (!this.connection) {
+            console.log('[GuildPlayer] Creating new voice connection');
             this.connection = joinVoiceChannel({
                 channelId: voiceChannel.id,
                 guildId: voiceChannel.guild.id,
                 adapterCreator: voiceChannel.guild.voiceAdapterCreator as unknown as any,
             });
-        }
-        if (!this.player) {
-            this.player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
-            this.setupPlayerListeners();
-        }
-        if (this.connection) {
             this.connection.subscribe(this.player);
         }
     }
 
     private setupPlayerListeners() {
-        // Remove all existing listeners to prevent duplicates
-        this.player.removeAllListeners();
+        console.log('[GuildPlayer] Setting up player listeners for guild:', this.guildId);
         
-        this.player.on('stateChange', (_oldS, newS) => {
-            console.log('[GuildPlayer] Player state:', newS.status);
+        this.player.on('stateChange', (oldState, newState) => {
+            console.log(`[GuildPlayer] guild=${this.guildId} Player state: ${oldState.status} -> ${newState.status}`);
         });
         
         this.player.on(AudioPlayerStatus.Idle, () => {
-            console.log('[GuildPlayer] Player is idle, playing next track...');
-            this.playNext().catch((err) => {
-                console.error('[GuildPlayer] playNext failed:', err);
+            console.log(`[GuildPlayer] guild=${this.guildId} Player Idle detected - calling playNext()`);
+            this.playNext().catch((e) => {
+                console.error('[GuildPlayer] playNext error in Idle handler:', e);
             });
         });
         
         this.player.on('error', (e) => {
-            console.error('[GuildPlayer] Player error:', e.message);
+            console.error(`[GuildPlayer] guild=${this.guildId} Player error:`, e.message);
             // Try to play next track on error
             this.playNext().catch(() => {});
         });
+        
+        console.log('[GuildPlayer] Listeners registered successfully');
     }
 
     enqueue(track: Track, autoPlay = true) {
@@ -327,7 +326,11 @@ export default class GuildPlayer {
         }
 
         this.player.play(resource);
-        console.log('[GuildPlayer] ▶️ Started playing:', track.title);
+        console.log(`[GuildPlayer] guild=${this.guildId} ▶️ Started playing:`, track.title);
+        console.log(`[GuildPlayer] guild=${this.guildId} Player status after play():`, this.player.state.status);
+        
+        // Update queue message embed
+        await this.updateQueueMessage();
     }
 
     skip(): Track | null | false {
@@ -415,6 +418,67 @@ export default class GuildPlayer {
             } catch { }
             this.queueMessageId = null;
             this.queueChannelId = null;
+        }
+    }
+
+    public async updateQueueMessage() {
+        if (!this.queueMessageId || !this.queueChannelId) {
+            return; // No message to update
+        }
+
+        try {
+            const client = this.voiceChannel.client as any;
+            
+            const channel = await client.channels.fetch(this.queueChannelId);
+            if (!channel || !channel.isTextBased()) {
+                return;
+            }
+
+            const msg = await channel.messages.fetch(this.queueMessageId);
+            
+            // Build updated embed
+            const { buildQueueList } = await import('../commands/play');
+            
+            const nowPlaying = this.getCurrent();
+            const maxQueueToShow = 10;
+            const more = this.queue.length > maxQueueToShow ? `\n...and ${this.queue.length - maxQueueToShow} more` : '';
+            let queueStr = buildQueueList(this.queue.slice(0, maxQueueToShow)) + more;
+            if (!queueStr.trim()) queueStr = 'No tracks in queue.';
+            if (queueStr.length > 1024) queueStr = queueStr.slice(0, 1021) + '...';
+
+            const fields = [
+                { name: 'Now playing', value: nowPlaying?.title ?? 'Nothing' },
+                { name: 'Queue', value: queueStr },
+                { name: 'Started by', value: this.startedBy || 'Unknown', inline: true }
+            ];
+            if (this.lastAction) {
+                fields.push({ name: 'Last action', value: this.lastAction, inline: true });
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle('Music Queue')
+                .addFields(fields)
+                .setColor(0x00FF00);
+
+            if (nowPlaying?.thumbnail) {
+                embed.setThumbnail(nowPlaying.thumbnail);
+            } else if (nowPlaying?.url && nowPlaying.url.includes('youtube.com')) {
+                const videoId = nowPlaying.url.match(/[?&]v=([^&]+)/)?.[1];
+                if (videoId) {
+                    embed.setThumbnail(`https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`);
+                }
+            }
+
+            const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+                new ButtonBuilder().setCustomId('shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Primary),
+                new ButtonBuilder().setCustomId('skip').setLabel('Skip').setStyle(ButtonStyle.Secondary),
+                new ButtonBuilder().setCustomId('stop').setLabel('Stop').setStyle(ButtonStyle.Danger)
+            );
+
+            await msg.edit({ embeds: [embed], components: [row] });
+            console.log('[GuildPlayer] Queue message updated');
+        } catch (err) {
+            console.error('[GuildPlayer] Failed to update queue message:', err);
         }
     }
 
