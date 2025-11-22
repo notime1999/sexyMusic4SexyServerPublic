@@ -95,6 +95,13 @@ export default class GuildPlayer {
         
         this.player.on('error', (e) => {
             console.error(`[GuildPlayer] guild=${this.guildId} Player error:`, e.message);
+            
+            // If terminated error, retry the current track
+            if (e.message.includes('terminated') && this.currentTrack) {
+                console.log(`[GuildPlayer] Stream terminated, re-adding current track to front of queue`);
+                this.queue.unshift(this.currentTrack);
+            }
+            
             // Try to play next track on error
             this.playNext().catch(() => {});
         });
