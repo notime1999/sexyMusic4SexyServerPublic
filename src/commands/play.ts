@@ -43,7 +43,7 @@ export const execute = async (interaction: ChatInputCommandInteraction, args: st
     const playlistId = ytPlaylistMatch ? ytPlaylistMatch[1] : null;
     const isYouTubePlaylist = query.includes('youtube.com/playlist') || (query.includes('youtube.com/watch') && query.includes('&list='));
     const isSpotifyPlaylist = query.includes('open.spotify.com') && query.includes('/playlist');
-    const isSpotifyArtist = query.includes('open.spotify.com') && query.includes('/artist'); // FIX THIS
+    const isSpotifyArtist = query.includes('open.spotify.com') && /\/artist\//.test(query);
 
     console.log('[play] query=', query, 'isYouTubePlaylist=', isYouTubePlaylist, 'isSpotifyPlaylist=', isSpotifyPlaylist, 'isSpotifyArtist=', isSpotifyArtist);
 
